@@ -151,6 +151,9 @@ SCENE_PARAMS = {
     'depth_img_size': (100, 175),       # matches demo_simple_sensor
     'cam_view_width_m': 0.0194,         # 19.4 mm
     'cam_view_height_m': 0.0308,        # 30.8 mm
+
+    # Debug settings
+    'debug_verbose': False,             # Enable verbose per-frame logging
 }
 
 
@@ -187,6 +190,66 @@ def _box_blur_2d_xy(values: np.ndarray, iterations: int = 1) -> np.ndarray:
     return result
 
 
+def _fill_uv_holes(uv: np.ndarray, valid_mask: np.ndarray, max_iterations: int = 10) -> np.ndarray:
+    """
+    使用扩散法填充 UV 场中的空洞（无粒子覆盖的网格单元）。
+
+    Args:
+        uv: (H,W,2) UV 位移场
+        valid_mask: (H,W) bool，True 表示该单元有有效数据
+        max_iterations: 最大扩散迭代次数
+
+    Returns:
+        填充后的 UV 场 (H,W,2)
+    """
+    if uv.ndim != 3 or uv.shape[-1] != 2:
+        raise ValueError("uv must be (H,W,2)")
+    if valid_mask.shape != uv.shape[:2]:
+        raise ValueError("valid_mask shape must match uv[:,:,0]")
+
+    result = uv.astype(np.float32, copy=True)
+    filled = valid_mask.copy()
+
+    for _ in range(max_iterations):
+        if filled.all():
+            break  # 全部填充完成
+
+        # 找到未填充但有邻居已填充的单元
+        padded_filled = np.pad(filled.astype(np.float32), ((1, 1), (1, 1)), mode="constant", constant_values=0)
+        neighbor_count = (
+            padded_filled[0:-2, 0:-2] + padded_filled[0:-2, 1:-1] + padded_filled[0:-2, 2:] +
+            padded_filled[1:-1, 0:-2] +                            padded_filled[1:-1, 2:] +
+            padded_filled[2:, 0:-2]   + padded_filled[2:, 1:-1]   + padded_filled[2:, 2:]
+        )
+
+        # 可填充的单元：未填充 且 至少有一个邻居已填充
+        can_fill = (~filled) & (neighbor_count > 0)
+
+        if not can_fill.any():
+            break
+
+        # 计算邻居的加权平均
+        padded_uv = np.pad(result, ((1, 1), (1, 1), (0, 0)), mode="constant", constant_values=0)
+        padded_mask = np.pad(filled.astype(np.float32), ((1, 1), (1, 1)), mode="constant", constant_values=0)
+
+        neighbor_sum = np.zeros_like(result)
+        neighbor_weight = np.zeros(result.shape[:2], dtype=np.float32)
+
+        for di, dj in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]:
+            i_slice = slice(1 + di, result.shape[0] + 1 + di)
+            j_slice = slice(1 + dj, result.shape[1] + 1 + dj)
+            w = padded_mask[i_slice, j_slice]
+            neighbor_sum += padded_uv[i_slice, j_slice] * w[..., None]
+            neighbor_weight += w
+
+        # 填充
+        fill_mask = can_fill & (neighbor_weight > 0)
+        result[fill_mask] = neighbor_sum[fill_mask] / neighbor_weight[fill_mask][..., None]
+        filled[fill_mask] = True
+
+    return result
+
+
 def warp_marker_texture(
     base_tex: np.ndarray,
     uv_disp_mm: np.ndarray,
@@ -209,11 +272,31 @@ def warp_marker_texture(
     tex_h, tex_w = base_tex.shape[0], base_tex.shape[1]
     gel_w_mm, gel_h_mm = gel_size_mm
 
-    # Upsample uv field to texture resolution
+    # Upsample uv field to texture resolution using bilinear interpolation
+    # (Previously used nearest-neighbor which caused blocky displacement artifacts)
     src_h, src_w = uv_disp_mm.shape[0], uv_disp_mm.shape[1]
-    row_idx = (np.linspace(0, src_h - 1, tex_h)).astype(np.int32)
-    col_idx = (np.linspace(0, src_w - 1, tex_w)).astype(np.int32)
-    uv_up = uv_disp_mm[row_idx][:, col_idx]  # (tex_h, tex_w, 2)
+    if HAS_CV2:
+        # Use cv2.resize for smooth bilinear interpolation
+        uv_up = cv2.resize(uv_disp_mm, (tex_w, tex_h), interpolation=cv2.INTER_LINEAR)
+    else:
+        # Numpy fallback: bilinear upsampling
+        row_scale = (src_h - 1) / max(tex_h - 1, 1)
+        col_scale = (src_w - 1) / max(tex_w - 1, 1)
+        row_coords = np.arange(tex_h) * row_scale
+        col_coords = np.arange(tex_w) * col_scale
+        r0 = np.floor(row_coords).astype(np.int32)
+        c0 = np.floor(col_coords).astype(np.int32)
+        r1 = np.clip(r0 + 1, 0, src_h - 1)
+        c1 = np.clip(c0 + 1, 0, src_w - 1)
+        wr = (row_coords - r0).astype(np.float32)
+        wc = (col_coords - c0).astype(np.float32)
+        # Bilinear interpolation for each channel
+        uv_up = np.zeros((tex_h, tex_w, 2), dtype=np.float32)
+        for ch in range(2):
+            src = uv_disp_mm[..., ch]
+            top = src[r0[:, None], c0[None, :]] * (1 - wc[None, :]) + src[r0[:, None], c1[None, :]] * wc[None, :]
+            bot = src[r1[:, None], c0[None, :]] * (1 - wc[None, :]) + src[r1[:, None], c1[None, :]] * wc[None, :]
+            uv_up[..., ch] = top * (1 - wr[:, None]) + bot * wr[:, None]
 
     # mm -> px
     dx_px = (uv_up[..., 0] / max(gel_w_mm, 1e-6)) * tex_w
@@ -549,11 +632,13 @@ class MPMHeightFieldRenderer:
 
                 # Debug: show actual surface particle x positions
                 x_positions = pos_sensor[:, 0]
-                print(f"[MPM HEIGHT] min={height_field.min():.2f}mm, cells={valid_mask.sum()}, "
-                      f"center=({center_x_mm:.1f}, {center_y_mm:.1f})mm | "
-                      f"particles: x_range=[{x_positions.min():.1f}, {x_positions.max():.1f}]mm")
+                if SCENE_PARAMS.get('debug_verbose', False):
+                    print(f"[MPM HEIGHT] min={height_field.min():.2f}mm, cells={valid_mask.sum()}, "
+                          f"center=({center_x_mm:.1f}, {center_y_mm:.1f})mm | "
+                          f"particles: x_range=[{x_positions.min():.1f}, {x_positions.max():.1f}]mm")
         else:
-            print(f"[MPM HEIGHT] No significant deformation (threshold=0.05mm), particles={len(pos_sensor)}")
+            if SCENE_PARAMS.get('debug_verbose', False):
+                print(f"[MPM HEIGHT] No significant deformation (threshold=0.05mm), particles={len(pos_sensor)}")
 
         return height_field
 
@@ -616,6 +701,12 @@ class MPMHeightFieldRenderer:
         nonzero = uv_cnt > 0
         uv[nonzero] = uv_sum[nonzero] / uv_cnt[nonzero][..., None]
 
+        # Fill holes in UV field using diffusion from neighboring cells
+        # This prevents discontinuities in areas without particle coverage
+        hole_count = (~nonzero).sum()
+        if hole_count > 0:
+            uv = _fill_uv_holes(uv, nonzero, max_iterations=10)
+
         if smooth_uv:
             uv = _box_blur_2d_xy(uv, iterations=1)
 
@@ -633,12 +724,13 @@ class MPMHeightFieldRenderer:
         """
         # Debug: verify height field values before rendering
         neg_mask = height_field_mm < 0
-        if neg_mask.any():
-            print(f"[MPM RENDER] height_field: min={height_field_mm.min():.2f}mm, "
-                  f"shape={height_field_mm.shape}, negative_cells={neg_mask.sum()}")
-        else:
-            print(f"[MPM RENDER] WARNING: No negative values in height_field! "
-                  f"range=[{height_field_mm.min():.4f}, {height_field_mm.max():.4f}]")
+        if SCENE_PARAMS.get('debug_verbose', False):
+            if neg_mask.any():
+                print(f"[MPM RENDER] height_field: min={height_field_mm.min():.2f}mm, "
+                      f"shape={height_field_mm.shape}, negative_cells={neg_mask.sum()}")
+            else:
+                print(f"[MPM RENDER] WARNING: No negative values in height_field! "
+                      f"range=[{height_field_mm.min():.4f}, {height_field_mm.max():.4f}]")
         self.scene.set_height_field(height_field_mm)
         return self.scene.get_image()
 
@@ -709,6 +801,7 @@ class MPMSensorScene(Scene):
         self._show_marker = True
         self._marker_mode = "static"  # off|static|warp
         self._uv_disp_mm: Optional[np.ndarray] = None
+        self._cached_warped_tex: Optional[np.ndarray] = None  # Cache to avoid double remap per frame
         # NOTE: SensorScene 的 texcoords u_range=(1,0), v_range=(1,0)；MPM 侧跟随此约定。
         self._warp_flip_x = True
         self._warp_flip_y = True
@@ -817,7 +910,18 @@ class MPMSensorScene(Scene):
 
     def set_uv_displacement(self, uv_disp_mm: Optional[np.ndarray]) -> None:
         """设置当前帧的面内位移场 (Ny,Nx,2)，单位 mm。"""
-        self._uv_disp_mm = None if uv_disp_mm is None else uv_disp_mm.astype(np.float32, copy=False)
+        if uv_disp_mm is None:
+            self._uv_disp_mm = None
+        else:
+            # CRITICAL: Apply same horizontal flip as height_field to match mesh x_range convention
+            # height_field is flipped with [:, ::-1], so UV must be too
+            # Additionally, flip u-component sign since x-direction is reversed
+            uv_flipped = uv_disp_mm[:, ::-1].copy()
+            uv_flipped[..., 0] = -uv_flipped[..., 0]  # negate u (x displacement)
+            self._uv_disp_mm = uv_flipped.astype(np.float32, copy=False)
+        # 在 warp 模式下，每帧都需要更新纹理
+        if self._marker_mode == "warp":
+            self._update_marker_texture()
 
     def set_indenter_overlay(self, enabled: bool, square_size_mm: Optional[float] = None) -> None:
         self._indenter_overlay_enabled = bool(enabled)
@@ -835,9 +939,11 @@ class MPMSensorScene(Scene):
     def _update_marker_texture(self) -> None:
         if not self._show_marker or self._marker_mode == "off":
             self.marker_tex.setTexture(self.white_tex_np)
+            self._cached_warped_tex = None
             return
         if self._marker_mode == "static" or self._uv_disp_mm is None:
             self.marker_tex.setTexture(self.marker_tex_np)
+            self._cached_warped_tex = None
             return
         warped = warp_marker_texture(
             self.marker_tex_np,
@@ -846,6 +952,7 @@ class MPMSensorScene(Scene):
             flip_x=self._warp_flip_x,
             flip_y=self._warp_flip_y,
         )
+        self._cached_warped_tex = warped  # Cache for reuse in _update_depth_tint_texture
         self.marker_tex.setTexture(warped)
 
     @staticmethod
@@ -872,13 +979,18 @@ class MPMSensorScene(Scene):
         elif self._marker_mode == "static" or self._uv_disp_mm is None:
             base = self.marker_tex_np
         else:
-            base = warp_marker_texture(
-                self.marker_tex_np,
-                self._uv_disp_mm,
-                gel_size_mm=(self.gel_width_mm, self.gel_height_mm),
-                flip_x=self._warp_flip_x,
-                flip_y=self._warp_flip_y,
-            )
+            # Use cached warped texture to avoid double remap per frame
+            if self._cached_warped_tex is not None:
+                base = self._cached_warped_tex
+            else:
+                # Fallback: compute if cache is missing (shouldn't happen in normal flow)
+                base = warp_marker_texture(
+                    self.marker_tex_np,
+                    self._uv_disp_mm,
+                    gel_size_mm=(self.gel_width_mm, self.gel_height_mm),
+                    flip_x=self._warp_flip_x,
+                    flip_y=self._warp_flip_y,
+                )
 
         depth_pos = np.clip(-depth_mm, 0.0, None)  # mm, >=0
         if depth_pos.max() <= 1e-6:
@@ -914,7 +1026,7 @@ class MPMSensorScene(Scene):
 
         # Debug: verify depth values being sent to mesh
         neg_count = (depth < -0.01).sum()
-        if neg_count > 0:
+        if neg_count > 0 and SCENE_PARAMS.get('debug_verbose', False):
             print(f"[MESH UPDATE] depth: min={depth.min():.2f}mm, neg_cells(>0.01mm)={neg_count}")
 
         self.surf_mesh.setData(depth, smooth)
@@ -953,7 +1065,8 @@ class MPMSensorScene(Scene):
             x_mm, y_mm = self._indenter_center_mm
             cell_w = self.gel_width_mm / self.n_col
             cell_h = self.gel_height_mm / self.n_row
-            col = int((x_mm + self.gel_width_mm / 2.0) / cell_w)
+            # CRITICAL: Negate x_mm to match height_field horizontal flip (mesh x_range convention)
+            col = int((-x_mm + self.gel_width_mm / 2.0) / cell_w)
             row = int(y_mm / cell_h)
             col = int(np.clip(col, 0, self.n_col - 1))
             row = int(np.clip(row, 0, self.n_row - 1))
@@ -1039,10 +1152,28 @@ class MPMSimulationAdapter:
         # Indenter setup
         indenter_r = SCENE_PARAMS['indenter_radius_mm'] * 1e-3
         indenter_gap = SCENE_PARAMS['indenter_start_gap_mm'] * 1e-3
+        indenter_type = SCENE_PARAMS.get('indenter_type', 'box')
+
+        # Determine the effective z half-height for indenter placement
+        # For sphere: use radius; for box: use half_extents[2]
+        if indenter_type == 'sphere':
+            indenter_z_half = indenter_r
+            half_extents = (indenter_r, 0, 0)  # sphere uses radius in first component
+        else:
+            # Box (flat bottom): use half_extents for z calculation
+            half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
+            if half_extents_mm is not None:
+                hx, hy, hz = half_extents_mm
+                half_extents = (float(hx) * 1e-3, float(hy) * 1e-3, float(hz) * 1e-3)
+            else:
+                half_extents = (indenter_r, indenter_r, indenter_r)
+            indenter_z_half = half_extents[2]  # Use actual z half-height for box
+
+        # Calculate indenter center with correct z based on indenter type
         indenter_center = (
             float(self._particle_center[0]),
             float(self._particle_center[1]),
-            float(self.initial_top_z_m + indenter_r + indenter_gap),
+            float(self.initial_top_z_m + indenter_z_half + indenter_gap),
         )
 
         obstacles = [
@@ -1050,29 +1181,20 @@ class MPMSimulationAdapter:
         ]
 
         # Add indenter based on type
-        indenter_type = SCENE_PARAMS.get('indenter_type', 'box')
         if indenter_type == 'sphere':
-            # Sphere: half_extents[0] = radius
             obstacles.append(SDFConfig(
                 sdf_type="sphere",
                 center=indenter_center,
-                half_extents=(indenter_r, 0, 0)
+                half_extents=half_extents
             ))
         else:
-            # Box (flat bottom): matches square STL better
-            half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
-            if half_extents_mm is not None:
-                hx, hy, hz = half_extents_mm
-                half_extents = (float(hx) * 1e-3, float(hy) * 1e-3, float(hz) * 1e-3)
-            else:
-                half_extents = (indenter_r, indenter_r, indenter_r)
             obstacles.append(SDFConfig(
                 sdf_type="box",
                 center=indenter_center,
                 half_extents=half_extents
             ))
 
-        print(f"[MPM] Indenter: type={indenter_type}, radius={indenter_r*1000:.1f}mm, "
+        print(f"[MPM] Indenter: type={indenter_type}, z_half={indenter_z_half*1000:.1f}mm, "
               f"center=({indenter_center[0]*1000:.1f}, {indenter_center[1]*1000:.1f}, {indenter_center[2]*1000:.1f})mm")
 
         config = MPMConfig(
@@ -1234,7 +1356,7 @@ class MPMSimulationAdapter:
             self.solver.obstacle_centers.from_numpy(centers_np)
 
             # Verify update took effect
-            if step % 50 == 0:
+            if step % 50 == 0 and SCENE_PARAMS.get('debug_verbose', False):
                 actual = self.solver.obstacle_centers[1]
                 print(f"[INDENTER UPDATE] step={step}: target_x={new_center[0]*1000:.2f}mm, actual_x={actual[0]*1000:.2f}mm")
 
@@ -1264,9 +1386,10 @@ class MPMSimulationAdapter:
 
                 # Verify actual indenter position from solver
                 actual_center = self.solver.obstacle_centers[1]
-                print(f"[MPM SIM] Step {step}: dz={dz*1000:.1f}mm, dx={dx_slide*1000:.1f}mm | "
-                      f"indent={max_indent*1000:.1f}mm, x_slide={max_x_slide*1000:.1f}mm | "
-                      f"min_z={min_z*1000:.1f}mm, below_ground={below_ground}")
+                if SCENE_PARAMS.get('debug_verbose', False):
+                    print(f"[MPM SIM] Step {step}: dz={dz*1000:.1f}mm, dx={dx_slide*1000:.1f}mm | "
+                          f"indent={max_indent*1000:.1f}mm, x_slide={max_x_slide*1000:.1f}mm | "
+                          f"min_z={min_z*1000:.1f}mm, below_ground={below_ground}")
 
         elapsed = time.time() - start_time
         print(f"MPM trajectory complete: {elapsed:.2f}s, {len(self.positions_history)} frames")
@@ -1511,6 +1634,10 @@ def main():
         '--save-dir', type=str, default=None,
         help='Directory to save frame images'
     )
+    parser.add_argument(
+        '--debug', action='store_true', default=False,
+        help='Enable verbose per-frame debug logging'
+    )
 
     args = parser.parse_args()
 
@@ -1518,6 +1645,7 @@ def main():
     SCENE_PARAMS['press_depth_mm'] = args.press_mm
     SCENE_PARAMS['slide_distance_mm'] = args.slide_mm
     SCENE_PARAMS['indenter_type'] = args.indenter_type
+    SCENE_PARAMS['debug_verbose'] = args.debug
 
     if args.indenter_size_mm is not None:
         square_d_mm = float(args.indenter_size_mm)
