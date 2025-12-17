@@ -1,0 +1,23 @@
+import cv2 
+cam1 = cv2.VideoCapture(4)
+cam1.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+cam1.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+cam2 = cv2.VideoCapture(6)
+cam2.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+cam2.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+cam3 = cv2.VideoCapture(8)
+cam3.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+cam3.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+cam4 = cv2.VideoCapture(10)
+cam4.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+cam4.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+
+ret, frame  = cam1.read()
+print(ret)
+ret, frame  = cam2.read()
+print(ret)
+ret, frame  = cam3.read()
+print(ret)
+ret, frame  = cam4.read()
+print(ret)
+

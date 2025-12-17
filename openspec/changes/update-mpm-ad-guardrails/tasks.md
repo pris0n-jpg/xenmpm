@@ -1,0 +1,35 @@
+## 1. 实施
+- [x] 1.1 Autodiff 保护：在 API/CLI 层显式拒绝梯度路径，返回明确错误信息与替代方案，避免 Tape 触发 Taichi AD 原子限制。
+  - 在 DifferentiableMPMSolver.__init__ 添加 UserWarning
+  - 类 docstring 中明确说明 autodiff 当前不可用
+  - 保持 run_with_gradients 内的 NotImplementedError 阻断
+- [x] 1.2 文档一致性：确保限制/实施状态文档存在并与代码引用路径一致；缺失时阻断或提示。
+  - 移动 CODEX_REVIEW_FIXES_SUMMARY.md 到 xengym/mpm/
+  - 验证所有技术文档在 xengym/mpm/ 目录
+- [x] 1.3 Loss 语义澄清：在规格/接口中定义能量 loss 范围（总能量或动能），必要时补充总能量 loss kernel。
+  - 重命名 _compute_energy_loss 为 _compute_kinetic_energy_loss
+  - 添加详细 docstring 说明仅计算动能
+  - _get_loss_kernel 中添加 loss 类型说明
+  - README 中明确 'energy' loss 默认为动能
+- [x] 1.4 Kernel 路径约束：当前已统一（ti.static 分支），补充同步性测试要求，防止未来出现未测试的分叉。
+  - README 中说明 ti.static() 统一路径
+  - 标注默认路径为非STE
+- [x] 1.5 规格与 README 对齐：在用户文档中同步上述限制、默认行为与使用建议。
+  - 更新 autodiff 示例，添加 loss 类型说明
+  - 明确能量 loss 默认为动能
+
+## 2. 验证
+- [x] 2.1 尝试调用梯度接口时应得到可读错误/警告而非崩溃。
+  - DifferentiableMPMSolver 初始化时发出 UserWarning
+  - run_with_gradients 抛出 NotImplementedError
+- [x] 2.2 文档检查：代码引用的限制文件实际存在且路径正确。
+  - TAICHI_AUTODIFF_LIMITATIONS.md ✓
+  - IMPLEMENTATION_STATUS_AUTODIFF.md ✓
+  - CODEX_REVIEW_FIXES_SUMMARY.md ✓ (已移动)
+- [x] 2.3 Loss 测试：能量 loss 与文档一致（动能或总能量），输出符合定义。
+  - 函数重命名为 _compute_kinetic_energy_loss
+  - Docstring 明确说明仅动能
+  - README 和代码文档一致
+- [x] 2.4 Kernel 路径测试：仅保留的路径通过现有验证场景，若存在分支需有同步测试。
+  - 已验证 update_F_and_internal 使用 ti.static() 统一路径
+  - README 中标注默认路径和分支说明

@@ -1,0 +1,139 @@
+# ============================================
+# Xengym + Xensesdk Project .gitignore
+# ============================================
+
+# === IDE / Editor ===
+*.sublime-project
+*.sublime-workspace
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# mypy / type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# pyenv
+.python-version
+
+# === Project Output ===
+output/
+xengym/output/
+xensesdk/output/
+configs/
+
+# === AI / Claude Code Tools ===
+.claude/
+.serena/memories/
+
+# Generated documentation / status files
+CODEX_REVIEW_*.md
+FINAL_*.md
+IMPLEMENTATION_STATUS.md
+
+# === Large Data Files ===
+*.h5
+*.hdf5
+*.npz.bak
+*.pkl
+*.pickle
+
+# Raw calibration data (keep processed assets only)
+calibration/raw_data/
+calibration/cache/
+
+# === Windows Artifacts ===
+nul
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Conda/pip temp files
+=*
+
+# === Cython / C Extensions ===
+source/assimp/*.cpp
+*.lprof
+
+# === Generated STL Files ===
+*.convex.stl
+
+# === Documentation (PDF) ===
+# Large binary docs, keep source files instead
+*.pdf
+
+# === Misc ===
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Keep these tracked (not ignored)
+# - xengym/assets/data/*.npz (FEM precomputed data)
+# - xengym/assets/obj/*.STL (indenter meshes)
+# - xensesdk/xensesdk/*.pyd (compiled SDK)

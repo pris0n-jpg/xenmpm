@@ -1,0 +1,2 @@
+上位机软件是位于dist文件下的host_machine_eng.exe文件
+host_machine_eng.py文件可进行二次开发，直接运行该文件也可以控制电机运动

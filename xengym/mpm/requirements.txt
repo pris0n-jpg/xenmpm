@@ -1,0 +1,6 @@
+# Production dependencies for xengym.mpm
+# Install with: pip install -r requirements.txt
+
+taichi>=1.6.0,<2.0.0
+numpy>=1.20.0,<2.0.0
+pyyaml>=5.4.0,<7.0.0

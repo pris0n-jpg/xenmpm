@@ -1,0 +1,40 @@
+{
+  "_comment": "Quick Maxwell viscoelastic validation (~50 particles, ~100 steps, runs in seconds)",
+  "grid": {
+    "grid_size": [24, 24, 24],
+    "dx": 0.02,
+    "origin": [0.0, 0.0, 0.0]
+  },
+  "time": {
+    "dt": 0.0002,
+    "num_steps": 100,
+    "substeps": 1
+  },
+  "material": {
+    "density": 1000.0,
+    "ogden": {
+      "mu": [30000.0],
+      "alpha": [2.0],
+      "kappa": 300000.0
+    },
+    "maxwell_branches": [
+      {"G": 10000.0, "tau": 0.02}
+    ],
+    "enable_bulk_viscosity": false,
+    "bulk_viscosity": 0.0
+  },
+  "contact": {
+    "enable_contact": false,
+    "contact_stiffness_normal": 100000.0,
+    "contact_stiffness_tangent": 50000.0,
+    "mu_s": 0.5,
+    "mu_k": 0.3,
+    "friction_transition_vel": 0.02,
+    "K_clear": 5
+  },
+  "output": {
+    "output_interval": 10,
+    "save_velocity": true,
+    "save_deformation_gradient": false
+  }
+}

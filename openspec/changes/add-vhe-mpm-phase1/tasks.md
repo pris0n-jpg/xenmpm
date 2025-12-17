@@ -1,0 +1,11 @@
+## 1. 实施
+- [x] 1.1 补充 config dataclass/JSON 解析，涵盖网格/时间步/材料（Ogden+Maxwell+可选体粘性）、接触、输出选项。
+- [x] 1.2 建立 fields.py 与 decomp.py：粒子/网格/能量字段分配，SafeSVD 接口槽位（默认 Ti 内置）。
+- [x] 1.3 搭建 mpm_solver.py 流程骨架（clear_grid → p2g → grid_op → g2p → update_F_and_internal → reduce_energies → cleanup_ut），保持 grid_ut 不被清空。
+- [x] 1.4 实现 constitutive.py：Ogden 偏差 + Barrier 体积 + Maxwell 分支（上对流/松弛/投影）、ΔE_proj_step 与 E_proj_cum 累积、可选 Kelvin-Voigt 体粘性。
+- [x] 1.5 实现 contact.py：SDF penalty 法向 + 正则化弹塑性摩擦（tanh 过渡），grid_contact_mask 标记与 grid_nocontact_age 迟滞清理 u_t。
+- [x] 1.6 完成 reduce_energies 与能量输出（E_kin/E_elastic/E_viscous_step/E_viscous_cum/E_proj_step/E_proj_cum），确保粒子级增量正确归并。
+- [x] 1.7 自动微分封装：autodiff_wrapper 提供 run_sim_and_compute_loss 接口，对材料参数/初始状态/外部驱动支持梯度。
+- [x] 1.8 CLI/入口：main.py 支持加载配置、选择场景、运行并保存输出（CSV/图像）。
+- [x] 1.9 验证场景与后处理：单轴拉伸、纯剪切+客观性、应力松弛/Δt 收敛、能量分解 & ΔE_proj 对比、块-板 stick–slip、GelSlim incipient slip、网格收敛（Hertz/球撞击）；生成曲线/光流等对比。
+- [x] 1.10 稳定性检查：启动阶段执行 Drucker-type Ogden 参数检查与 Δt 约束提示；补充单元测试/quick_test 覆盖能量守恒与摩擦回路。

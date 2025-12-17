@@ -1,0 +1,47 @@
+{
+  "grid": {
+    "grid_size": [64, 64, 64],
+    "dx": 0.01,
+    "origin": [0.0, 0.0, 0.0]
+  },
+  "time": {
+    "dt": 0.0001,
+    "num_steps": 5000,
+    "substeps": 1
+  },
+  "material": {
+    "density": 1000.0,
+    "ogden": {
+      "mu": [100000.0, 10000.0],
+      "alpha": [2.0, -2.0],
+      "kappa": 1000000.0
+    },
+    "maxwell_branches": [
+      {
+        "G": 10000.0,
+        "tau": 0.1
+      },
+      {
+        "G": 5000.0,
+        "tau": 0.5
+      }
+    ],
+    "enable_bulk_viscosity": false,
+    "bulk_viscosity": 0.0
+  },
+  "contact": {
+    "enable_contact": true,
+    "contact_stiffness": 100000.0,
+    "mu_s": 0.5,
+    "mu_k": 0.3,
+    "friction_transition_vel": 0.001,
+    "K_clear": 10
+  },
+  "output": {
+    "output_dir": "output",
+    "save_particles": true,
+    "save_energy": true,
+    "save_contact_data": true,
+    "output_interval": 10
+  }
+}

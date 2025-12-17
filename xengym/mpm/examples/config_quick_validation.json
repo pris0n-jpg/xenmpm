@@ -1,0 +1,38 @@
+{
+  "_comment": "Quick validation config for smoke tests (~100 particles, ~100 steps, runs in seconds)",
+  "grid": {
+    "grid_size": [32, 32, 32],
+    "dx": 0.02,
+    "origin": [0.0, 0.0, 0.0]
+  },
+  "time": {
+    "dt": 0.0002,
+    "num_steps": 100,
+    "substeps": 1
+  },
+  "material": {
+    "density": 1000.0,
+    "ogden": {
+      "mu": [50000.0, 5000.0],
+      "alpha": [2.0, -2.0],
+      "kappa": 500000.0
+    },
+    "maxwell_branches": [],
+    "enable_bulk_viscosity": false,
+    "bulk_viscosity": 0.0
+  },
+  "contact": {
+    "enable_contact": true,
+    "contact_stiffness_normal": 500000.0,
+    "contact_stiffness_tangent": 250000.0,
+    "mu_s": 0.5,
+    "mu_k": 0.3,
+    "friction_transition_vel": 0.02,
+    "K_clear": 5
+  },
+  "output": {
+    "output_interval": 20,
+    "save_velocity": true,
+    "save_deformation_gradient": false
+  }
+}
