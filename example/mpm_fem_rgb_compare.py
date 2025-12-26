@@ -37,6 +37,7 @@ import sys
 import ast
 import re
 import datetime
+import struct
 
 # Add project root to path for standalone execution
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -180,6 +181,91 @@ def _infer_square_size_mm_from_stl_path(object_file: Optional[str]) -> Optional[
         return None
     try:
         return float(m.group(1))
+    except Exception:
+        return None
+
+
+def _analyze_binary_stl_endfaces_mm(stl_path: Path) -> Optional[Dict[str, object]]:
+    """
+    Analyze a binary STL and return simple end-face extents (mm) at y_min / y_max.
+
+    This is used as a lightweight verification tool for assets like circle_r4.STL
+    whose bottom (y_min) and top (y_max) faces may have very different contact footprints.
+    """
+    try:
+        with stl_path.open("rb") as f:
+            header = f.read(80)
+            if len(header) != 80:
+                return None
+            tri_count_bytes = f.read(4)
+            if len(tri_count_bytes) != 4:
+                return None
+            tri_count = struct.unpack("<I", tri_count_bytes)[0]
+            if tri_count <= 0:
+                return None
+            raw = f.read(50 * tri_count)
+            if len(raw) != 50 * tri_count:
+                return None
+
+        tri_dtype = np.dtype(
+            [
+                ("normal", "<f4", (3,)),
+                ("v1", "<f4", (3,)),
+                ("v2", "<f4", (3,)),
+                ("v3", "<f4", (3,)),
+                ("attr", "<u2"),
+            ]
+        )
+        if tri_dtype.itemsize != 50:
+            return None
+
+        tris = np.frombuffer(raw, dtype=tri_dtype, count=tri_count)
+        verts = np.concatenate([tris["v1"], tris["v2"], tris["v3"]], axis=0).astype(np.float64)
+        if verts.size == 0:
+            return None
+
+        bbox_min = verts.min(axis=0)
+        bbox_max = verts.max(axis=0)
+        y_min = float(bbox_min[1])
+        y_max = float(bbox_max[1])
+        height = max(y_max - y_min, 0.0)
+
+        tol = max(1e-6, height * 1e-4)
+        mask_min = verts[:, 1] <= (y_min + tol)
+        mask_max = verts[:, 1] >= (y_max - tol)
+        if not mask_min.any() or not mask_max.any():
+            return None
+
+        vmin = verts[mask_min]
+        vmax = verts[mask_max]
+
+        def _xz_extents_mm(v: np.ndarray) -> Dict[str, float]:
+            x_min_m = float(v[:, 0].min())
+            x_max_m = float(v[:, 0].max())
+            z_min_m = float(v[:, 2].min())
+            z_max_m = float(v[:, 2].max())
+            return {
+                "x_min_mm": x_min_m * 1000.0,
+                "x_max_mm": x_max_m * 1000.0,
+                "z_min_mm": z_min_m * 1000.0,
+                "z_max_mm": z_max_m * 1000.0,
+                "size_x_mm": (x_max_m - x_min_m) * 1000.0,
+                "size_z_mm": (z_max_m - z_min_m) * 1000.0,
+            }
+
+        return {
+            "path": str(stl_path).replace("\\", "/"),
+            "triangles": int(tri_count),
+            "bbox_min_mm": (bbox_min * 1000.0).tolist(),
+            "bbox_max_mm": (bbox_max * 1000.0).tolist(),
+            "y_min_mm": y_min * 1000.0,
+            "y_max_mm": y_max * 1000.0,
+            "height_mm": height * 1000.0,
+            "endfaces_mm": {
+                "y_min": _xz_extents_mm(vmin),
+                "y_max": _xz_extents_mm(vmax),
+            },
+        }
     except Exception:
         return None
 
@@ -357,13 +443,20 @@ def warp_marker_texture(
 class FEMRGBRenderer:
     """FEM sensor RGB rendering using existing VecTouchSim pipeline"""
 
-    def __init__(self, fem_file: str, object_file: Optional[str] = None, visible: bool = False):
+    def __init__(
+        self,
+        fem_file: str,
+        object_file: Optional[str] = None,
+        visible: bool = False,
+        indenter_face: str = "base",
+    ):
         if not HAS_EZGL:
-            raise RuntimeError("ezgl not available for FEM rendering")
+            raise RuntimeError("ezgl not available for FEM rendering")   
 
         self.fem_file = Path(fem_file)
         self.object_file = object_file
         self.visible = visible
+        self.indenter_face = indenter_face
 
         # Create depth scene for object rendering
         self.depth_scene = self._create_depth_scene()
@@ -384,7 +477,8 @@ class FEMRGBRenderer:
         """Create depth rendering scene for the indenter"""
         return DepthRenderScene(
             object_file=self.object_file,
-            visible=self.visible
+            visible=self.visible,
+            indenter_face=self.indenter_face,
         )
 
     def set_indenter_pose(self, x_mm: float, y_mm: float, z_mm: float):
@@ -433,7 +527,12 @@ class FEMRGBRenderer:
 class DepthRenderScene(Scene):
     """Simple depth rendering scene for indenter object"""
 
-    def __init__(self, object_file: Optional[str] = None, visible: bool = True):
+    def __init__(
+        self,
+        object_file: Optional[str] = None,
+        visible: bool = True,
+        indenter_face: str = "base",
+    ):
         # Note: visible=True is required for proper OpenGL context initialization
         super().__init__(600, 400, visible=visible, title="Depth Render")
         self.cameraLookAt((0.1, 0.1, 0.1), (0, 0, 0), (0, 1, 0))
@@ -443,15 +542,18 @@ class DepthRenderScene(Scene):
         self.cam_view_height = SCENE_PARAMS['cam_view_height_m']
 
         # Create indenter object (sphere by default)
+        stl_path: Optional[Path] = None
         if object_file and Path(object_file).exists():
+            stl_path = Path(object_file)
             self.object = GLModelItem(
                 object_file, glOptions="translucent",
                 lights=PointLight()
             )
         else:
             # Use built-in sphere
+            stl_path = ASSET_DIR / "obj/circle_r4.STL"
             self.object = GLModelItem(
-                str(ASSET_DIR / "obj/circle_r4.STL"),
+                str(stl_path),
                 glOptions="translucent",
                 lights=PointLight()
             )
@@ -475,9 +577,34 @@ class DepthRenderScene(Scene):
 
         # IMPORTANT: setTransform() will overwrite any constructor-time rotate/translate.
         # 所以“固定旋转/偏移”必须显式地与每帧 pose 合成，再一次性 setTransform()，避免隐式状态。
+        self._indenter_face = indenter_face
+        self._stl_endfaces_mm: Optional[Dict[str, object]] = None
+        self._stl_height_m = 0.0
+        if stl_path and stl_path.suffix.lower() == ".stl" and stl_path.exists():
+            stats = _analyze_binary_stl_endfaces_mm(stl_path)
+            if stats is not None:
+                self._stl_endfaces_mm = stats
+                height_mm = float(stats.get("height_mm", 0.0))
+                self._stl_height_m = max(height_mm * 1e-3, 0.0)
+
         self._object_fixed_tf = Matrix4x4()     # local->parent 固定变换（轴对齐/朝向/模型原点偏移等）
         self._object_pose_raw = Matrix4x4()     # 每帧输入 pose（仅平移/旋转控制量）
         self._object_pose = Matrix4x4()         # 最终用于渲染+FEM 的世界变换（raw * fixed）
+        self._apply_indenter_face()
+
+    def _apply_indenter_face(self) -> None:
+        face = str(self._indenter_face).strip().lower()
+        if face not in {"base", "tip"}:
+            face = "base"
+        self._indenter_face = face
+
+        self._object_fixed_tf = Matrix4x4()
+        if face == "tip":
+            # 目标：把 STL 的 y_max 端面翻到 y_min 方向，确保“tip”端面可用于接触对齐验证。
+            # 使用 y 轴翻转（绕 X 轴 180°），并用 STL 高度做一次平移以保持 tip 端面仍位于局部 y≈0 平面。
+            if self._stl_height_m > 0:
+                self._object_fixed_tf.translate(0, float(self._stl_height_m), 0)
+            self._object_fixed_tf.rotate(180, 1, 0, 0)
 
     def set_object_pose(self, x: float, y: float, z: float):
         """Set object position in meters"""
@@ -1441,12 +1568,14 @@ class RGBComparisonEngine:
         object_file: Optional[str] = None,
         mode: str = 'raw',
         visible: bool = True,
-        save_dir: Optional[str] = None
+        save_dir: Optional[str] = None,
+        fem_indenter_face: str = "base",
     ):
         self.mode = mode
         self.visible = visible
         self.save_dir = Path(save_dir) if save_dir else None
         self.run_context: Dict[str, object] = {}
+        self.fem_indenter_face = fem_indenter_face
 
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -1457,8 +1586,13 @@ class RGBComparisonEngine:
         self.mpm_sim = None
 
         if HAS_EZGL:
-            self.fem_renderer = FEMRGBRenderer(fem_file, object_file=object_file, visible=False)
-            self.mpm_renderer = MPMHeightFieldRenderer(visible=False)
+            self.fem_renderer = FEMRGBRenderer(
+                fem_file,
+                object_file=object_file,
+                visible=False,
+                indenter_face=self.fem_indenter_face,
+            )
+            self.mpm_renderer = MPMHeightFieldRenderer(visible=False)    
 
         if HAS_TAICHI:
             self.mpm_sim = MPMSimulationAdapter()
@@ -1703,6 +1837,10 @@ def main():
         help='Path to indenter STL file (default: sphere)'
     )
     parser.add_argument(
+        '--fem-indenter-face', type=str, choices=['base', 'tip'], default='base',
+        help='FEM indenter STL face selection: base (y_min, may look like square base) or tip (y_max, round tip)'
+    )
+    parser.add_argument(
         '--mode', type=str, choices=['raw', 'diff'], default='raw',
         help='Visualization mode: raw (direct RGB) or diff (relative to reference)'
     )
@@ -1792,6 +1930,22 @@ def main():
     print(f"FEM indenter: circle_r4.STL (cylinder, ~4mm radius)")        
     if args.object_file:
         print(f"Object file: {args.object_file}")
+    print(f"FEM indenter face: {args.fem_indenter_face}")
+
+    stl_path = Path(args.object_file) if args.object_file else (_PROJECT_ROOT / "xengym" / "assets" / "obj" / "circle_r4.STL")
+    stl_stats = _analyze_binary_stl_endfaces_mm(stl_path) if stl_path.exists() else None
+    if stl_stats is not None:
+        try:
+            ymin = stl_stats["endfaces_mm"]["y_min"]
+            ymax = stl_stats["endfaces_mm"]["y_max"]
+            print(
+                "Indenter STL endfaces (mm): "
+                f"y_min size≈{ymin['size_x_mm']:.1f}x{ymin['size_z_mm']:.1f}, "
+                f"y_max size≈{ymax['size_x_mm']:.1f}x{ymax['size_z_mm']:.1f}, "
+                f"height≈{float(stl_stats['height_mm']):.1f}"
+            )
+        except Exception:
+            pass
     print(f"MPM marker: {args.mpm_marker}")
     if args.mpm_show_indenter:
         print("MPM indenter overlay: enabled")
@@ -1824,7 +1978,8 @@ def main():
         object_file=args.object_file,
         mode=args.mode,
         visible=True,
-        save_dir=args.save_dir
+        save_dir=args.save_dir,
+        fem_indenter_face=args.fem_indenter_face,
     )
     engine.mpm_marker_mode = args.mpm_marker
     engine.mpm_show_indenter = args.mpm_show_indenter
@@ -1835,6 +1990,7 @@ def main():
         "args": vars(args),
         "resolved": {
             "square_indenter_size_mm": float(square_d_mm) if square_d_mm is not None else None,
+            "indenter_stl": stl_stats,
         },
     }
     engine.run_comparison(fps=args.fps, record_interval=int(args.record_interval))
