@@ -446,6 +446,16 @@ def warp_marker_texture(
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def _mpm_flip_x_field(field: np.ndarray) -> np.ndarray:
+    """Apply MPM->render horizontal flip (x axis) to match mesh x_range convention."""
+    return field[:, ::-1]
+
+
+def _mpm_flip_x_mm(x_mm: float) -> float:
+    """Apply MPM->render horizontal flip (x axis) for scalar coordinates (mm)."""
+    return -float(x_mm)
+
+
 # ==============================================================================
 # FEM RGB Renderer (Reuses VecTouchSim)
 # ==============================================================================
@@ -667,6 +677,9 @@ class DepthRenderScene(Scene):
 
     def get_object_pose(self) -> Matrix4x4:
         return self._object_pose
+
+    def get_object_pose_raw(self) -> Matrix4x4:
+        return self._object_pose_raw
 
     def get_sensor_pose(self) -> Matrix4x4:
         return self.depth_cam.transform(local=False)
@@ -1110,7 +1123,7 @@ class MPMSensorScene(Scene):
             # CRITICAL: Apply same horizontal flip as height_field to match mesh x_range convention
             # height_field is flipped with [:, ::-1], so UV must be too
             # Additionally, flip u-component sign since x-direction is reversed
-            uv_flipped = uv_disp_mm[:, ::-1].copy()
+            uv_flipped = _mpm_flip_x_field(uv_disp_mm).copy()
             uv_flipped[..., 0] = -uv_flipped[..., 0]  # negate u (x displacement)
             self._uv_disp_mm = uv_flipped.astype(np.float32, copy=False)
         # 在 warp 模式下，每帧都需要更新纹理
@@ -1213,7 +1226,7 @@ class MPMSensorScene(Scene):
         # CRITICAL: Flip horizontally to match mesh x_range convention
         # Height field: col=0 is x=-gel_w/2 (left)
         # Mesh x_range: (gel_w/2, -gel_w/2) means col=0 is x=+gel_w/2 (right)
-        height_field_mm = height_field_mm[:, ::-1]
+        height_field_mm = _mpm_flip_x_field(height_field_mm)
 
         # Ensure negative values for indentation (SensorScene convention)
         depth = np.minimum(height_field_mm, 0)
@@ -1259,8 +1272,9 @@ class MPMSensorScene(Scene):
             x_mm, y_mm = self._indenter_center_mm
             cell_w = self.gel_width_mm / self.n_col
             cell_h = self.gel_height_mm / self.n_row
-            # CRITICAL: Negate x_mm to match height_field horizontal flip (mesh x_range convention)
-            col = int((-x_mm + self.gel_width_mm / 2.0) / cell_w)
+            # Keep overlay consistent with MPM render flip convention (see _mpm_flip_x_field).
+            x_mm = _mpm_flip_x_mm(x_mm)
+            col = int((x_mm + self.gel_width_mm / 2.0) / cell_w)
             row = int(y_mm / cell_h)
             col = int(np.clip(col, 0, self.n_col - 1))
             row = int(np.clip(row, 0, self.n_row - 1))
@@ -1312,6 +1326,7 @@ class MPMSimulationAdapter:
         self.solver = None
         self.positions_history: List[np.ndarray] = []
         self.frame_controls: List[Tuple[float, float]] = []  # [(press_amount_m, slide_amount_m)]
+        self.frame_indenter_centers_m: List[Tuple[float, float, float]] = []  # [(x,y,z)] at recorded frames
         self.initial_top_z_m = 0.0
         self.initial_positions_m: Optional[np.ndarray] = None
         self._base_indices_np: Optional[np.ndarray] = None
@@ -1516,6 +1531,7 @@ class MPMSimulationAdapter:
 
         self.positions_history = []
         self.frame_controls = []
+        self.frame_indenter_centers_m = []
 
         print(f"Running MPM trajectory: {total_steps} steps")
         start_time = time.time()
@@ -1564,9 +1580,10 @@ class MPMSimulationAdapter:
 
             # Record positions
             if step % record_interval == 0:
-                pos = self.solver.get_particle_data()['x'].copy()
+                pos = self.solver.get_particle_data()['x'].copy()        
                 self.positions_history.append(pos)
                 self.frame_controls.append((float(dz), float(dx_slide)))
+                self.frame_indenter_centers_m.append((float(new_center[0]), float(new_center[1]), float(new_center[2])))
 
                 # Debug: check particle displacement
                 z_displacements = pos[:, 2] - self._initial_positions[:, 2]
@@ -1799,6 +1816,25 @@ class RGBComparisonEngine:
                 y_pos_mm = -press_y_mm
                 print(f"[FEM] Frame {frame_idx[0]}: press={press_y_mm:.2f}mm, slide={slide_x_mm:.2f}mm")
                 self.fem_renderer.set_indenter_pose(slide_x_mm, y_pos_mm, 0.0)
+
+                if SCENE_PARAMS.get("debug_verbose", False):
+                    mpm_center_mm = None
+                    if (
+                        self.mpm_sim
+                        and getattr(self.mpm_sim, "frame_indenter_centers_m", None)
+                        and frame_idx[0] < len(self.mpm_sim.frame_indenter_centers_m)
+                    ):
+                        cx, cy, cz = self.mpm_sim.frame_indenter_centers_m[frame_idx[0]]
+                        mpm_center_mm = [cx * 1000.0, cy * 1000.0, cz * 1000.0]
+
+                    fem_raw_mm = None
+                    try:
+                        fem_raw_mm = (self.fem_renderer.depth_scene.get_object_pose_raw().xyz * 1000.0).tolist()
+                    except Exception:
+                        pass
+
+                    if mpm_center_mm is not None or fem_raw_mm is not None:
+                        print(f"[POSE] frame={frame_idx[0]} mpm_center_mm={mpm_center_mm} fem_raw_pose_mm={fem_raw_mm}")
                 fem_rgb = self.fem_renderer.step()
                 if self.mode == 'diff':
                     fem_rgb = self.fem_renderer.get_diff_image()
