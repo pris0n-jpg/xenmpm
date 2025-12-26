@@ -447,14 +447,14 @@ class DepthRenderScene(Scene):
             self.object = GLModelItem(
                 object_file, glOptions="translucent",
                 lights=PointLight()
-            ).translate(0, 0.02, 0)
+            )
         else:
             # Use built-in sphere
             self.object = GLModelItem(
                 str(ASSET_DIR / "obj/circle_r4.STL"),
                 glOptions="translucent",
                 lights=PointLight()
-            ).translate(0, 0.02, 0)
+            )
 
         # Depth camera
         self.depth_cam = DepthCamera(
@@ -473,12 +473,35 @@ class DepthRenderScene(Scene):
             actual_depth=True
         )
 
-        self._object_pose = Matrix4x4()
+        # IMPORTANT: setTransform() will overwrite any constructor-time rotate/translate.
+        # 所以“固定旋转/偏移”必须显式地与每帧 pose 合成，再一次性 setTransform()，避免隐式状态。
+        self._object_fixed_tf = Matrix4x4()     # local->parent 固定变换（轴对齐/朝向/模型原点偏移等）
+        self._object_pose_raw = Matrix4x4()     # 每帧输入 pose（仅平移/旋转控制量）
+        self._object_pose = Matrix4x4()         # 最终用于渲染+FEM 的世界变换（raw * fixed）
 
     def set_object_pose(self, x: float, y: float, z: float):
         """Set object position in meters"""
-        self._object_pose = Matrix4x4.fromVector6d(x, y, z, 0, 0, 0)
+        self._object_pose_raw = Matrix4x4.fromVector6d(x, y, z, 0, 0, 0)
+        final_tf = Matrix4x4(self._object_pose_raw) * self._object_fixed_tf
+        self._object_pose = Matrix4x4(final_tf)
         self.object.setTransform(self._object_pose)
+
+        if SCENE_PARAMS.get("debug_verbose", False):
+            try:
+                raw_xyz = self._object_pose_raw.xyz.tolist()
+                fixed_xyz = self._object_fixed_tf.xyz.tolist()
+                final_xyz = self._object_pose.xyz.tolist()
+                raw_euler = getattr(self._object_pose_raw, "euler", None)
+                fixed_euler = getattr(self._object_fixed_tf, "euler", None)
+                final_euler = getattr(self._object_pose, "euler", None)
+                print(
+                    "[DepthRenderScene] "
+                    f"raw_xyz={raw_xyz}, fixed_xyz={fixed_xyz}, final_xyz={final_xyz}; "
+                    f"raw_euler={raw_euler}, fixed_euler={fixed_euler}, final_euler={final_euler}"
+                )
+            except Exception:
+                # debug 模式下也不应因为日志失败而影响渲染
+                pass
 
     def get_object_pose(self) -> Matrix4x4:
         return self._object_pose
