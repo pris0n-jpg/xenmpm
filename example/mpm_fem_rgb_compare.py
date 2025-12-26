@@ -17,7 +17,7 @@ Usage:
     python example/mpm_fem_rgb_compare.py --save-dir output/rgb_compare
 
     # Recommended baseline (stable, auditable output):
-    python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --fric 0.4 --save-dir output/rgb_compare/baseline
+    python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --fric 0.4 --mpm-marker warp --mpm-depth-tint off --save-dir output/rgb_compare/baseline
 
 Output (when --save-dir is set):
     - fem_XXXX.png / mpm_XXXX.png
@@ -1015,6 +1015,7 @@ class MPMSensorScene(Scene):
         self._marker_mode = "static"  # off|static|warp
         self._uv_disp_mm: Optional[np.ndarray] = None
         self._cached_warped_tex: Optional[np.ndarray] = None  # Cache to avoid double remap per frame
+        self._depth_tint_enabled = True
         # NOTE: SensorScene 的 texcoords u_range=(1,0), v_range=(1,0)；MPM 侧跟随此约定。
         self._warp_flip_x = True
         self._warp_flip_y = True
@@ -1119,6 +1120,11 @@ class MPMSensorScene(Scene):
         if mode not in ("off", "static", "warp"):
             raise ValueError("marker mode must be one of: off|static|warp")
         self._marker_mode = mode
+        self._update_marker_texture()
+
+    def set_depth_tint_enabled(self, enabled: bool) -> None:
+        """Toggle depth tint overlay on the marker/white texture."""
+        self._depth_tint_enabled = bool(enabled)
         self._update_marker_texture()
 
     def set_uv_displacement(self, uv_disp_mm: Optional[np.ndarray]) -> None:
@@ -1244,7 +1250,8 @@ class MPMSensorScene(Scene):
 
         self.surf_mesh.setData(depth, smooth)
         self._update_marker_texture()
-        self._update_depth_tint_texture(depth)
+        if self._depth_tint_enabled:
+            self._update_depth_tint_texture(depth)
 
     def get_image(self) -> np.ndarray:
         """Render and return RGB image"""
@@ -1661,6 +1668,7 @@ class RGBComparisonEngine:
         if HAS_TAICHI:
             self.mpm_sim = MPMSimulationAdapter()
         self.mpm_marker_mode = "static"
+        self.mpm_depth_tint = True
         self.mpm_show_indenter = False
         self.mpm_debug_overlay = "off"
         self.indenter_square_size_mm = _infer_square_size_mm_from_stl_path(object_file)
@@ -1785,6 +1793,7 @@ class RGBComparisonEngine:
                 self.mpm_sim.initial_positions_m, self.mpm_sim.initial_top_z_m
             )
             self.mpm_renderer.scene.set_marker_mode(self.mpm_marker_mode)
+            self.mpm_renderer.scene.set_depth_tint_enabled(self.mpm_depth_tint)
             self.mpm_renderer.scene.set_indenter_overlay(self.mpm_show_indenter, square_size_mm=self.indenter_square_size_mm)
             self.mpm_renderer.scene.set_debug_overlay(self.mpm_debug_overlay)
 
@@ -1973,6 +1982,10 @@ def main():
         help='MPM marker rendering: off|static|warp (warp reflects stretch/shear from tangential displacement)'
     )
     parser.add_argument(
+        '--mpm-depth-tint', type=str, choices=['on', 'off'], default='on',
+        help='MPM depth tint overlay on marker texture: on|off'
+    )
+    parser.add_argument(
         '--mpm-show-indenter', action='store_true', default=False,
         help='Overlay MPM indenter projection in the RGB view (2D overlay)'
     )
@@ -2065,6 +2078,21 @@ def main():
     aligned_fric = (abs(fem_fric - mpm_mu_s) < 1e-9) and (abs(fem_fric - mpm_mu_k) < 1e-9)
     print(f"Friction: FEM fric_coef={fem_fric:.4g}, MPM mu_s={mpm_mu_s:.4g}, mu_k={mpm_mu_k:.4g}, aligned={aligned_fric}")
 
+    gel_w_mm, gel_h_mm = [float(v) for v in SCENE_PARAMS.get("gel_size_mm", (0.0, 0.0))]
+    cam_w_mm = float(SCENE_PARAMS.get("cam_view_width_m", 0.0)) * 1000.0
+    cam_h_mm = float(SCENE_PARAMS.get("cam_view_height_m", 0.0)) * 1000.0
+    tol_mm = 0.2
+    dw_mm = cam_w_mm - gel_w_mm
+    dh_mm = cam_h_mm - gel_h_mm
+    scale_consistent = (abs(dw_mm) <= tol_mm) and (abs(dh_mm) <= tol_mm)
+    print(
+        f"Scale: gel_size_mm=({gel_w_mm:.2f}, {gel_h_mm:.2f}), "
+        f"cam_view_mm=({cam_w_mm:.2f}, {cam_h_mm:.2f}), "
+        f"delta_mm=({dw_mm:+.2f}, {dh_mm:+.2f}), consistent={scale_consistent}"
+    )
+    if not scale_consistent:
+        print("Note: gel_size_mm follows VecTouchSim defaults; cam_view_* follows demo_simple_sensor camera calibration.")
+
     fem_indenter_geom = args.fem_indenter_geom
     if fem_indenter_geom == "auto":
         fem_indenter_geom = "stl" if args.object_file else args.indenter_type
@@ -2107,6 +2135,7 @@ def main():
             except Exception:
                 pass
     print(f"MPM marker: {args.mpm_marker}")
+    print(f"MPM depth tint: {args.mpm_depth_tint}")
     if args.mpm_show_indenter:
         print("MPM indenter overlay: enabled")
     if args.steps:
@@ -2143,6 +2172,7 @@ def main():
         fem_indenter_geom=fem_indenter_geom,
     )
     engine.mpm_marker_mode = args.mpm_marker
+    engine.mpm_depth_tint = (str(args.mpm_depth_tint).lower().strip() != "off")
     engine.mpm_show_indenter = args.mpm_show_indenter
     engine.mpm_debug_overlay = args.mpm_debug_overlay
     if square_d_mm is not None:
@@ -2158,6 +2188,17 @@ def main():
                 "mpm_mu_s": float(mpm_mu_s),
                 "mpm_mu_k": float(mpm_mu_k),
                 "aligned": bool(aligned_fric),
+            },
+            "render": {
+                "mpm_marker": str(args.mpm_marker),
+                "mpm_depth_tint": bool(str(args.mpm_depth_tint).lower().strip() != "off"),
+            },
+            "scale": {
+                "gel_size_mm": [float(gel_w_mm), float(gel_h_mm)],
+                "cam_view_mm": [float(cam_w_mm), float(cam_h_mm)],
+                "delta_mm": [float(dw_mm), float(dh_mm)],
+                "consistent": bool(scale_consistent),
+                "tolerance_mm": float(tol_mm),
             },
         },
     }
