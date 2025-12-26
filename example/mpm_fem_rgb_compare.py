@@ -17,7 +17,7 @@ Usage:
     python example/mpm_fem_rgb_compare.py --save-dir output/rgb_compare
 
     # Recommended baseline (stable, auditable output):
-    python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --fric 0.4 --mpm-marker warp --mpm-depth-tint off --save-dir output/rgb_compare/baseline
+    python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --fric 0.4 --mpm-marker warp --mpm-depth-tint off --export-intermediate --save-dir output/rgb_compare/baseline
 
 Output (when --save-dir is set):
     - fem_XXXX.png / mpm_XXXX.png
@@ -28,6 +28,7 @@ Requirements:
     - FEM data file (default: assets/data/fem_data_gel_2035.npz)
 """
 import argparse
+import csv
 import json
 import numpy as np
 from pathlib import Path
@@ -459,6 +460,35 @@ def _mpm_flip_x_field(field: np.ndarray) -> np.ndarray:
 def _mpm_flip_x_mm(x_mm: float) -> float:
     """Apply MPM->render horizontal flip (x axis) for scalar coordinates (mm)."""
     return -float(x_mm)
+
+
+def _compute_rgb_diff_metrics(a_rgb: np.ndarray, b_rgb: np.ndarray) -> Dict[str, float]:
+    """
+    Compute simple per-frame RGB difference metrics for audit/regression.
+
+    Returns:
+        dict with keys: mae, mae_r, mae_g, mae_b, max_abs, p50, p90, p99.
+    """
+    if a_rgb is None or b_rgb is None:
+        raise ValueError("RGB inputs must not be None")
+    if a_rgb.shape != b_rgb.shape:
+        raise ValueError(f"RGB shape mismatch: {a_rgb.shape} vs {b_rgb.shape}")
+
+    a16 = a_rgb.astype(np.int16, copy=False)
+    b16 = b_rgb.astype(np.int16, copy=False)
+    abs_diff = np.abs(a16 - b16).astype(np.float32, copy=False)
+
+    p50, p90, p99 = [float(x) for x in np.percentile(abs_diff, [50, 90, 99]).tolist()]
+    return {
+        "mae": float(abs_diff.mean()),
+        "mae_r": float(abs_diff[..., 0].mean()),
+        "mae_g": float(abs_diff[..., 1].mean()),
+        "mae_b": float(abs_diff[..., 2].mean()),
+        "max_abs": float(abs_diff.max()),
+        "p50": p50,
+        "p90": p90,
+        "p99": p99,
+    }
 
 
 # ==============================================================================
@@ -1673,6 +1703,14 @@ class RGBComparisonEngine:
         self.mpm_debug_overlay = "off"
         self.indenter_square_size_mm = _infer_square_size_mm_from_stl_path(object_file)
 
+        # Export / audit outputs (only active when --save-dir is set)
+        self.export_intermediate = False
+        self.export_intermediate_every = 1
+        self._exported_metrics_frames = set()
+        self._exported_intermediate_frames = set()
+        self._metrics_rows = []
+        self._frame_to_phase: Optional[List[str]] = None
+
     def _write_run_manifest(self, record_interval: int, total_frames: int) -> None:
         if not self.save_dir:
             return
@@ -1691,6 +1729,7 @@ class RGBComparisonEngine:
 
         frame_to_step = [int(i * record_interval) for i in range(int(total_frames))]
         frame_to_phase = [_phase_for_step(step) for step in frame_to_step]
+        self._frame_to_phase = list(frame_to_phase)
         phase_ranges: Dict[str, Dict[str, int]] = {}
         for i, phase in enumerate(frame_to_phase):
             if phase not in phase_ranges:
@@ -1737,6 +1776,14 @@ class RGBComparisonEngine:
                     "mpm": "mpm_*.png",
                 },
                 "run_manifest": "run_manifest.json",
+                "metrics": {
+                    "csv": "metrics.csv",
+                    "json": "metrics.json",
+                },
+                "intermediate": {
+                    "dir": "intermediate",
+                    "frames_glob": "intermediate/frame_*.npz",
+                },
             },
         }
 
@@ -1748,6 +1795,114 @@ class RGBComparisonEngine:
             )
         except Exception as e:
             print(f"Warning: failed to write run manifest: {e}")
+
+    def _write_metrics_files(self) -> None:
+        if not self.save_dir or not self._metrics_rows:
+            return
+
+        metrics_csv_path = self.save_dir / "metrics.csv"
+        metrics_json_path = self.save_dir / "metrics.json"
+        fieldnames = [
+            "frame",
+            "phase",
+            "mode",
+            "mae",
+            "mae_r",
+            "mae_g",
+            "mae_b",
+            "max_abs",
+            "p50",
+            "p90",
+            "p99",
+        ]
+
+        try:
+            with metrics_csv_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in self._metrics_rows:
+                    writer.writerow({k: row.get(k, "") for k in fieldnames})
+        except Exception as e:
+            print(f"Warning: failed to write metrics.csv: {e}")
+
+        try:
+            mae_values = [float(row.get("mae", 0.0)) for row in self._metrics_rows]
+            summary = {"frames": int(len(self._metrics_rows))}
+            if mae_values:
+                mae_arr = np.array(mae_values, dtype=np.float32)
+                summary.update(
+                    {
+                        "mae_mean": float(mae_arr.mean()),
+                        "mae_p50": float(np.percentile(mae_arr, 50)),
+                        "mae_p90": float(np.percentile(mae_arr, 90)),
+                        "mae_max": float(mae_arr.max()),
+                    }
+                )
+            payload = {
+                "created_at": datetime.datetime.now().astimezone().isoformat(),
+                "rows": list(self._metrics_rows),
+                "summary": summary,
+            }
+            metrics_json_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"Warning: failed to write metrics.json: {e}")
+
+    def _compute_fem_contact_mask_u8(self) -> Optional[np.ndarray]:
+        if not self.fem_renderer:
+            return None
+        sim = getattr(self.fem_renderer, "sensor_sim", None)
+        fem_sim = getattr(sim, "fem_sim", None)
+        if fem_sim is None:
+            return None
+        try:
+            contact_idx = fem_sim.contact_state.contact_idx()
+            n_top = int(len(fem_sim.top_nodes))
+            mask_flat = np.zeros((n_top,), dtype=np.uint8)
+            if contact_idx is not None and contact_idx.shape[1] > 0:
+                top_idx = contact_idx[0].astype(np.int64, copy=False)
+                mask_flat[top_idx] = 1
+            return mask_flat.reshape(fem_sim.mesh_shape)
+        except Exception:
+            return None
+
+    def _export_intermediate_frame(
+        self,
+        frame: int,
+        mpm_height_field_mm: Optional[np.ndarray],
+        mpm_uv_disp_mm: Optional[np.ndarray],
+        fem_depth_mm: Optional[np.ndarray],
+        fem_marker_disp: Optional[np.ndarray],
+        fem_contact_mask_u8: Optional[np.ndarray],
+    ) -> None:
+        if not self.save_dir:
+            return
+        intermediate_dir = self.save_dir / "intermediate"
+        try:
+            intermediate_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        payload: Dict[str, object] = {"frame": np.array(int(frame), dtype=np.int32)}
+        if mpm_height_field_mm is not None:
+            payload["mpm_height_field_mm"] = mpm_height_field_mm.astype(np.float32, copy=False)
+            payload["mpm_contact_mask_u8"] = (mpm_height_field_mm < -0.01).astype(np.uint8, copy=False)
+        if mpm_uv_disp_mm is not None:
+            payload["mpm_uv_disp_mm"] = mpm_uv_disp_mm.astype(np.float32, copy=False)
+        if fem_depth_mm is not None:
+            payload["fem_depth_mm"] = fem_depth_mm.astype(np.float32, copy=False)
+        if fem_marker_disp is not None:
+            payload["fem_marker_disp"] = fem_marker_disp.astype(np.float32, copy=False)
+        if fem_contact_mask_u8 is not None:
+            payload["fem_contact_mask_u8"] = fem_contact_mask_u8.astype(np.uint8, copy=False)
+
+        out_path = intermediate_dir / f"frame_{int(frame):04d}.npz"
+        try:
+            np.savez_compressed(out_path, **payload)
+        except Exception as e:
+            print(f"Warning: failed to export intermediate frame {frame}: {e}")
 
     def run_comparison(self, fps: int = 30, record_interval: int = 5):
         """Run side-by-side comparison visualization"""
@@ -1861,14 +2016,16 @@ class RGBComparisonEngine:
 
             # MPM rendering
             mpm_rgb = None
+            mpm_height_field = None
+            mpm_uv_disp = None
             if self.mpm_renderer and mpm_positions and frame_idx[0] < len(mpm_positions):
                 pos = mpm_positions[frame_idx[0]]
-                height_field, uv_disp = self.mpm_renderer.extract_surface_fields(pos, self.mpm_sim.initial_top_z_m)
-                self.mpm_renderer.scene.set_uv_displacement(uv_disp)
+                mpm_height_field, mpm_uv_disp = self.mpm_renderer.extract_surface_fields(pos, self.mpm_sim.initial_top_z_m)
+                self.mpm_renderer.scene.set_uv_displacement(mpm_uv_disp)
                 if self.mode == 'diff':
-                    mpm_rgb = self.mpm_renderer.get_diff_image(height_field)
+                    mpm_rgb = self.mpm_renderer.get_diff_image(mpm_height_field)
                 else:
-                    mpm_rgb = self.mpm_renderer.render(height_field)
+                    mpm_rgb = self.mpm_renderer.render(mpm_height_field)
                 if mpm_view[0] is not None:
                     mpm_view[0].setData(mpm_rgb)
 
@@ -1877,10 +2034,59 @@ class RGBComparisonEngine:
                     # y 方向用胶体中心做可视化对齐（square 压头在 y 方向不移动）
                     self.mpm_renderer.scene.set_indenter_center(float(slide_amount_m) * 1000.0, SCENE_PARAMS['gel_size_mm'][1] / 2.0)
 
+            # Export metrics / intermediate artifacts (once per frame_id)
+            if self.save_dir:
+                frame_id = int(frame_idx[0])
+
+                if fem_rgb is not None and mpm_rgb is not None and frame_id not in self._exported_metrics_frames:
+                    self._exported_metrics_frames.add(frame_id)
+                    try:
+                        metrics = _compute_rgb_diff_metrics(fem_rgb, mpm_rgb)
+                        phase = None
+                        if self._frame_to_phase is not None and frame_id < len(self._frame_to_phase):
+                            phase = self._frame_to_phase[frame_id]
+                        self._metrics_rows.append(
+                            {
+                                "frame": int(frame_id),
+                                "phase": phase,
+                                "mode": str(self.mode),
+                                **metrics,
+                            }
+                        )
+                        self._write_metrics_files()
+                    except Exception as e:
+                        print(f"Warning: failed to compute metrics for frame {frame_id}: {e}")
+
+                if self.export_intermediate and frame_id not in self._exported_intermediate_frames:
+                    self._exported_intermediate_frames.add(frame_id)
+                    every = int(self.export_intermediate_every) if int(self.export_intermediate_every) > 0 else 1
+                    if frame_id % every == 0:
+                        fem_depth_mm = None
+                        fem_marker_disp = None
+                        fem_contact_mask_u8 = None
+                        if self.fem_renderer is not None:
+                            try:
+                                fem_depth_mm = self.fem_renderer.sensor_sim.get_depth()
+                            except Exception:
+                                pass
+                            try:
+                                fem_marker_disp = self.fem_renderer.sensor_sim.get_marker_displacement()
+                            except Exception:
+                                pass
+                            fem_contact_mask_u8 = self._compute_fem_contact_mask_u8()
+                        self._export_intermediate_frame(
+                            frame=frame_id,
+                            mpm_height_field_mm=mpm_height_field,
+                            mpm_uv_disp_mm=mpm_uv_disp,
+                            fem_depth_mm=fem_depth_mm,
+                            fem_marker_disp=fem_marker_disp,
+                            fem_contact_mask_u8=fem_contact_mask_u8,
+                        )
+
             # Save frame if requested
-            if self.save_dir and HAS_CV2 and fem_rgb is not None:
+            if self.save_dir and HAS_CV2 and fem_rgb is not None:        
                 cv2.imwrite(
-                    str(self.save_dir / f"fem_{frame_idx[0]:04d}.png"),
+                    str(self.save_dir / f"fem_{frame_idx[0]:04d}.png"),  
                     cv2.cvtColor(fem_rgb, cv2.COLOR_RGB2BGR)
                 )
                 if mpm_rgb is not None:
@@ -2006,6 +2212,14 @@ def main():
         help='Directory to save frame images'
     )
     parser.add_argument(
+        '--export-intermediate', action='store_true', default=False,
+        help='Export intermediate arrays (height_field/uv_disp/contact_mask) to --save-dir/intermediate (npz)'
+    )
+    parser.add_argument(
+        '--export-intermediate-every', type=int, default=1,
+        help='Export intermediate every N frames (default: 1); effective only with --export-intermediate'
+    )
+    parser.add_argument(
         '--debug', action='store_true', default=False,
         help='Enable verbose per-frame debug logging'
     )
@@ -2026,6 +2240,10 @@ def main():
         and _validate_nonneg("--mpm-mu-s", args.mpm_mu_s)
         and _validate_nonneg("--mpm-mu-k", args.mpm_mu_k)
     ):
+        return 1
+
+    if int(args.export_intermediate_every) <= 0:
+        print("ERROR: --export-intermediate-every must be a positive integer")
         return 1
 
     # Update scene params from args
@@ -2151,6 +2369,9 @@ def main():
     if args.save_dir:
         print(f"Saving frames to: {args.save_dir}")
         print("Run manifest: run_manifest.json (params + frame→phase mapping)")
+        print("Metrics: metrics.csv / metrics.json")
+        if args.export_intermediate:
+            print(f"Intermediate: enabled (every={int(args.export_intermediate_every)}) -> intermediate/frame_XXXX.npz")
     print()
 
     # Check dependencies
@@ -2175,6 +2396,8 @@ def main():
     engine.mpm_depth_tint = (str(args.mpm_depth_tint).lower().strip() != "off")
     engine.mpm_show_indenter = args.mpm_show_indenter
     engine.mpm_debug_overlay = args.mpm_debug_overlay
+    engine.export_intermediate = bool(args.export_intermediate)
+    engine.export_intermediate_every = int(args.export_intermediate_every)
     if square_d_mm is not None:
         engine.indenter_square_size_mm = float(square_d_mm)
     engine.run_context = {
@@ -2199,6 +2422,10 @@ def main():
                 "delta_mm": [float(dw_mm), float(dh_mm)],
                 "consistent": bool(scale_consistent),
                 "tolerance_mm": float(tol_mm),
+            },
+            "export": {
+                "intermediate": bool(args.export_intermediate),
+                "intermediate_every": int(args.export_intermediate_every),
             },
         },
     }
