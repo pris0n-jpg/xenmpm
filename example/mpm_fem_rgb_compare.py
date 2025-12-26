@@ -16,11 +16,19 @@ Usage:
     python example/mpm_fem_rgb_compare.py --mode diff --press-mm 1.5
     python example/mpm_fem_rgb_compare.py --save-dir output/rgb_compare
 
+    # Recommended baseline (stable, auditable output):
+    python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --save-dir output/rgb_compare/baseline
+
+Output (when --save-dir is set):
+    - fem_XXXX.png / mpm_XXXX.png
+    - run_manifest.json (resolved params + frame->phase mapping)
+
 Requirements:
     - xengym conda environment with Taichi installed
     - FEM data file (default: assets/data/fem_data_gel_2035.npz)
 """
 import argparse
+import json
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -28,6 +36,7 @@ import time
 import sys
 import ast
 import re
+import datetime
 
 # Add project root to path for standalone execution
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1414,6 +1423,7 @@ class RGBComparisonEngine:
         self.mode = mode
         self.visible = visible
         self.save_dir = Path(save_dir) if save_dir else None
+        self.run_context: Dict[str, object] = {}
 
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -1434,7 +1444,83 @@ class RGBComparisonEngine:
         self.mpm_debug_overlay = "off"
         self.indenter_square_size_mm = _infer_square_size_mm_from_stl_path(object_file)
 
-    def run_comparison(self, fps: int = 30):
+    def _write_run_manifest(self, record_interval: int, total_frames: int) -> None:
+        if not self.save_dir:
+            return
+
+        press_steps = int(SCENE_PARAMS["press_steps"])
+        slide_steps = int(SCENE_PARAMS["slide_steps"])
+        hold_steps = int(SCENE_PARAMS["hold_steps"])
+        total_steps = press_steps + slide_steps + hold_steps
+
+        def _phase_for_step(step: int) -> str:
+            if step < press_steps:
+                return "press"
+            if step < press_steps + slide_steps:
+                return "slide"
+            return "hold"
+
+        frame_to_step = [int(i * record_interval) for i in range(int(total_frames))]
+        frame_to_phase = [_phase_for_step(step) for step in frame_to_step]
+        phase_ranges: Dict[str, Dict[str, int]] = {}
+        for i, phase in enumerate(frame_to_phase):
+            if phase not in phase_ranges:
+                phase_ranges[phase] = {"start_frame": i, "end_frame": i}
+            else:
+                phase_ranges[phase]["end_frame"] = i
+
+        frame_controls = None
+        if self.mpm_sim and self.mpm_sim.frame_controls:
+            frame_controls = [
+                {
+                    "frame": int(i),
+                    "press_amount_m": float(press_m),
+                    "slide_amount_m": float(slide_m),
+                }
+                for i, (press_m, slide_m) in enumerate(self.mpm_sim.frame_controls)
+            ]
+
+        manifest = {
+            "created_at": datetime.datetime.now().astimezone().isoformat(),
+            "argv": list(sys.argv),
+            "run_context": dict(self.run_context),
+            "scene_params": dict(SCENE_PARAMS),
+            "deps": {
+                "has_taichi": bool(HAS_TAICHI),
+                "has_ezgl": bool(HAS_EZGL),
+                "has_cv2": bool(HAS_CV2),
+            },
+            "trajectory": {
+                "press_steps": press_steps,
+                "slide_steps": slide_steps,
+                "hold_steps": hold_steps,
+                "total_steps": total_steps,
+                "record_interval": int(record_interval),
+                "total_frames": int(total_frames),
+                "phase_ranges_frames": phase_ranges,
+                "frame_to_step": frame_to_step,
+                "frame_to_phase": frame_to_phase,
+                "frame_controls": frame_controls,
+            },
+            "outputs": {
+                "frames_glob": {
+                    "fem": "fem_*.png",
+                    "mpm": "mpm_*.png",
+                },
+                "run_manifest": "run_manifest.json",
+            },
+        }
+
+        manifest_path = self.save_dir / "run_manifest.json"
+        try:
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"Warning: failed to write run manifest: {e}")
+
+    def run_comparison(self, fps: int = 30, record_interval: int = 5):
         """Run side-by-side comparison visualization"""
         if not HAS_EZGL:
             print("ezgl not available, cannot run visualization")
@@ -1442,10 +1528,13 @@ class RGBComparisonEngine:
 
         # Run MPM simulation first to get position history
         if self.mpm_sim:
-            positions_history = self.mpm_sim.run_trajectory(record_interval=5)
+            positions_history = self.mpm_sim.run_trajectory(record_interval=record_interval)
         else:
             positions_history = []
             print("MPM not available, showing FEM only")
+
+        total_frames = len(positions_history) if positions_history else 100
+        self._write_run_manifest(record_interval=record_interval, total_frames=total_frames)
 
         # Create UI
         self._create_ui(positions_history, fps)
@@ -1536,7 +1625,7 @@ class RGBComparisonEngine:
 
                 if self.mpm_show_indenter and self.mpm_sim and self.mpm_sim.frame_controls and frame_idx[0] < len(self.mpm_sim.frame_controls):
                     _, slide_amount_m = self.mpm_sim.frame_controls[frame_idx[0]]
-                    # NOTE: y 方向用胶体中心做可视化对齐（square 压头在 y 方向不移动）
+                    # y 方向用胶体中心做可视化对齐（square 压头在 y 方向不移动）
                     self.mpm_renderer.scene.set_indenter_center(float(slide_amount_m) * 1000.0, SCENE_PARAMS['gel_size_mm'][1] / 2.0)
 
             # Save frame if requested
@@ -1604,7 +1693,11 @@ def main():
     )
     parser.add_argument(
         '--steps', type=int, default=None,
-        help='Total simulation steps (default: press + slide + hold)'
+        help='Total simulation steps (default: press + slide + hold)'    
+    )
+    parser.add_argument(
+        '--record-interval', type=int, default=5,
+        help='Record MPM positions every N steps (affects total frames and phase mapping)'
     )
     parser.add_argument(
         '--indenter-type', type=str, choices=['sphere', 'box'], default='box',
@@ -1662,6 +1755,10 @@ def main():
         SCENE_PARAMS['slide_steps'] = int(args.steps * 0.55)
         SCENE_PARAMS['hold_steps'] = args.steps - SCENE_PARAMS['press_steps'] - SCENE_PARAMS['slide_steps']
 
+    if args.record_interval <= 0:
+        print("ERROR: --record-interval must be a positive integer")
+        return 1
+
     print("=" * 60)
     print("MPM vs FEM Sensor RGB Comparison")
     print("=" * 60)
@@ -1669,7 +1766,7 @@ def main():
     print(f"Press depth: {args.press_mm} mm")
     print(f"Slide distance: {args.slide_mm} mm")
     print(f"MPM indenter type: {args.indenter_type}")
-    print(f"FEM indenter: circle_r4.STL (cylinder, ~4mm radius)")
+    print(f"FEM indenter: circle_r4.STL (cylinder, ~4mm radius)")        
     if args.object_file:
         print(f"Object file: {args.object_file}")
     print(f"MPM marker: {args.mpm_marker}")
@@ -1677,9 +1774,17 @@ def main():
         print("MPM indenter overlay: enabled")
     if args.steps:
         print(f"Total steps: {args.steps}")
+    press_steps = int(SCENE_PARAMS["press_steps"])
+    slide_steps = int(SCENE_PARAMS["slide_steps"])
+    hold_steps = int(SCENE_PARAMS["hold_steps"])
+    total_steps = press_steps + slide_steps + hold_steps
+    expected_frames = (total_steps + int(args.record_interval) - 1) // int(args.record_interval)
+    print(f"Record interval: {args.record_interval} (expected frames: {expected_frames})")
+    print(f"Phase steps: press={press_steps}, slide={slide_steps}, hold={hold_steps} (total={total_steps})")
     print(f"FPS: {args.fps}")
     if args.save_dir:
         print(f"Saving frames to: {args.save_dir}")
+        print("Run manifest: run_manifest.json (params + frame→phase mapping)")
     print()
 
     # Check dependencies
@@ -1703,7 +1808,13 @@ def main():
     engine.mpm_debug_overlay = args.mpm_debug_overlay
     if square_d_mm is not None:
         engine.indenter_square_size_mm = float(square_d_mm)
-    engine.run_comparison(fps=args.fps)
+    engine.run_context = {
+        "args": vars(args),
+        "resolved": {
+            "square_indenter_size_mm": float(square_d_mm) if square_d_mm is not None else None,
+        },
+    }
+    engine.run_comparison(fps=args.fps, record_interval=int(args.record_interval))
 
     return 0
 
