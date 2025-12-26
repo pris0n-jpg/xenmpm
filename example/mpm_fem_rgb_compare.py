@@ -72,6 +72,8 @@ try:
     from xensesdk.ezgl.experimental.GLSurfMeshItem import GLSurfMeshItem
     from xensesdk.ezgl.items import (
         GLModelItem,
+        GLBoxItem,
+        GLMeshItem,
         DepthCamera,
         RGBCamera,
         PointLight,
@@ -80,6 +82,7 @@ try:
         Texture2D,
         Material,
     )
+    from xensesdk.ezgl.items.MeshData import sphere as ezgl_mesh_sphere
     from xengym.render import VecTouchSim
     from xengym import ASSET_DIR
     HAS_EZGL = True
@@ -98,6 +101,12 @@ except Exception as e:
         pass
     class GLModelItem:
         """Placeholder GLModelItem class"""
+        pass
+    class GLBoxItem:
+        """Placeholder GLBoxItem class"""
+        pass
+    class GLMeshItem:
+        """Placeholder GLMeshItem class"""
         pass
     class DepthCamera:
         """Placeholder DepthCamera class"""
@@ -449,6 +458,7 @@ class FEMRGBRenderer:
         object_file: Optional[str] = None,
         visible: bool = False,
         indenter_face: str = "base",
+        indenter_geom: str = "stl",
     ):
         if not HAS_EZGL:
             raise RuntimeError("ezgl not available for FEM rendering")   
@@ -457,6 +467,7 @@ class FEMRGBRenderer:
         self.object_file = object_file
         self.visible = visible
         self.indenter_face = indenter_face
+        self.indenter_geom = indenter_geom
 
         # Create depth scene for object rendering
         self.depth_scene = self._create_depth_scene()
@@ -479,6 +490,7 @@ class FEMRGBRenderer:
             object_file=self.object_file,
             visible=self.visible,
             indenter_face=self.indenter_face,
+            indenter_geom=self.indenter_geom,
         )
 
     def set_indenter_pose(self, x_mm: float, y_mm: float, z_mm: float):
@@ -532,6 +544,7 @@ class DepthRenderScene(Scene):
         object_file: Optional[str] = None,
         visible: bool = True,
         indenter_face: str = "base",
+        indenter_geom: str = "stl",
     ):
         # Note: visible=True is required for proper OpenGL context initialization
         super().__init__(600, 400, visible=visible, title="Depth Render")
@@ -541,21 +554,40 @@ class DepthRenderScene(Scene):
         self.cam_view_width = SCENE_PARAMS['cam_view_width_m']
         self.cam_view_height = SCENE_PARAMS['cam_view_height_m']
 
-        # Create indenter object (sphere by default)
+        self._indenter_geom = str(indenter_geom).strip().lower()
+        if self._indenter_geom not in {"stl", "box", "sphere"}:
+            self._indenter_geom = "stl"
+
+        # Create indenter object
         stl_path: Optional[Path] = None
-        if object_file and Path(object_file).exists():
-            stl_path = Path(object_file)
-            self.object = GLModelItem(
-                object_file, glOptions="translucent",
-                lights=PointLight()
+        if self._indenter_geom == "box":
+            half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
+            if half_extents_mm is not None:
+                hx_mm, hy_mm, hz_mm = half_extents_mm
+            else:
+                r_mm = float(SCENE_PARAMS["indenter_radius_mm"])
+                hx_mm = hy_mm = hz_mm = r_mm
+            size_m = (float(hx_mm) * 2e-3, float(hy_mm) * 2e-3, float(hz_mm) * 2e-3)
+            self.object = GLBoxItem(size=size_m, glOptions="translucent")
+        elif self._indenter_geom == "sphere":
+            r_m = float(SCENE_PARAMS["indenter_radius_mm"]) * 1e-3
+            verts, faces = ezgl_mesh_sphere(radius=r_m, rows=24, cols=24)
+            self.object = GLMeshItem(
+                vertexes=verts,
+                indices=faces,
+                lights=PointLight(),
+                glOptions="translucent",
             )
         else:
-            # Use built-in sphere
-            stl_path = ASSET_DIR / "obj/circle_r4.STL"
+            # STL path: prefer explicit object_file if provided
+            if object_file and Path(object_file).exists():
+                stl_path = Path(object_file)
+            else:
+                stl_path = ASSET_DIR / "obj/circle_r4.STL"
             self.object = GLModelItem(
                 str(stl_path),
                 glOptions="translucent",
-                lights=PointLight()
+                lights=PointLight(),
             )
 
         # Depth camera
@@ -580,7 +612,7 @@ class DepthRenderScene(Scene):
         self._indenter_face = indenter_face
         self._stl_endfaces_mm: Optional[Dict[str, object]] = None
         self._stl_height_m = 0.0
-        if stl_path and stl_path.suffix.lower() == ".stl" and stl_path.exists():
+        if self._indenter_geom == "stl" and stl_path and stl_path.suffix.lower() == ".stl" and stl_path.exists():
             stats = _analyze_binary_stl_endfaces_mm(stl_path)
             if stats is not None:
                 self._stl_endfaces_mm = stats
@@ -593,6 +625,9 @@ class DepthRenderScene(Scene):
         self._apply_indenter_face()
 
     def _apply_indenter_face(self) -> None:
+        if self._indenter_geom != "stl":
+            self._object_fixed_tf = Matrix4x4()
+            return
         face = str(self._indenter_face).strip().lower()
         if face not in {"base", "tip"}:
             face = "base"
@@ -1570,12 +1605,14 @@ class RGBComparisonEngine:
         visible: bool = True,
         save_dir: Optional[str] = None,
         fem_indenter_face: str = "base",
+        fem_indenter_geom: str = "auto",
     ):
         self.mode = mode
         self.visible = visible
         self.save_dir = Path(save_dir) if save_dir else None
         self.run_context: Dict[str, object] = {}
         self.fem_indenter_face = fem_indenter_face
+        self.fem_indenter_geom = fem_indenter_geom
 
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -1591,6 +1628,7 @@ class RGBComparisonEngine:
                 object_file=object_file,
                 visible=False,
                 indenter_face=self.fem_indenter_face,
+                indenter_geom=self.fem_indenter_geom,
             )
             self.mpm_renderer = MPMHeightFieldRenderer(visible=False)    
 
@@ -1841,6 +1879,10 @@ def main():
         help='FEM indenter STL face selection: base (y_min, may look like square base) or tip (y_max, round tip)'
     )
     parser.add_argument(
+        '--fem-indenter-geom', type=str, choices=['auto', 'stl', 'box', 'sphere'], default='auto',
+        help='FEM indenter geometry: auto (match MPM indenter-type when no --object-file), stl, box, sphere'
+    )
+    parser.add_argument(
         '--mode', type=str, choices=['raw', 'diff'], default='raw',
         help='Visualization mode: raw (direct RGB) or diff (relative to reference)'
     )
@@ -1927,25 +1969,48 @@ def main():
     print(f"Press depth: {args.press_mm} mm")
     print(f"Slide distance: {args.slide_mm} mm")
     print(f"MPM indenter type: {args.indenter_type}")
-    print(f"FEM indenter: circle_r4.STL (cylinder, ~4mm radius)")        
-    if args.object_file:
-        print(f"Object file: {args.object_file}")
-    print(f"FEM indenter face: {args.fem_indenter_face}")
 
-    stl_path = Path(args.object_file) if args.object_file else (_PROJECT_ROOT / "xengym" / "assets" / "obj" / "circle_r4.STL")
-    stl_stats = _analyze_binary_stl_endfaces_mm(stl_path) if stl_path.exists() else None
-    if stl_stats is not None:
-        try:
-            ymin = stl_stats["endfaces_mm"]["y_min"]
-            ymax = stl_stats["endfaces_mm"]["y_max"]
-            print(
-                "Indenter STL endfaces (mm): "
-                f"y_min size≈{ymin['size_x_mm']:.1f}x{ymin['size_z_mm']:.1f}, "
-                f"y_max size≈{ymax['size_x_mm']:.1f}x{ymax['size_z_mm']:.1f}, "
-                f"height≈{float(stl_stats['height_mm']):.1f}"
-            )
-        except Exception:
-            pass
+    fem_indenter_geom = args.fem_indenter_geom
+    if fem_indenter_geom == "auto":
+        fem_indenter_geom = "stl" if args.object_file else args.indenter_type
+    print(f"FEM indenter geom: {fem_indenter_geom}")
+    if args.object_file and fem_indenter_geom != "stl":
+        print(f"Note: --object-file is ignored because --fem-indenter-geom={fem_indenter_geom}")
+    if fem_indenter_geom == "stl":
+        default_stl = _PROJECT_ROOT / "xengym" / "assets" / "obj" / "circle_r4.STL"
+        stl_path_display = args.object_file if args.object_file else str(default_stl)
+        print(f"FEM indenter STL: {stl_path_display}")
+        print(f"FEM indenter face: {args.fem_indenter_face}")
+
+    # Print effective indenter size (MPM vs FEM) for auditability.
+    if args.indenter_type == "box":
+        half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
+        if half_extents_mm is None:
+            r_mm = float(SCENE_PARAMS["indenter_radius_mm"])
+            half_extents_mm = (r_mm, r_mm, r_mm)
+        hx_mm, hy_mm, hz_mm = [float(v) for v in half_extents_mm]
+        print(f"Indenter size (box, mm): half_extents=({hx_mm:.2f}, {hy_mm:.2f}, {hz_mm:.2f}), "
+              f"full=({hx_mm*2:.2f}, {hy_mm*2:.2f}, {hz_mm*2:.2f})")
+    else:
+        r_mm = float(SCENE_PARAMS["indenter_radius_mm"])
+        print(f"Indenter size (sphere, mm): radius={r_mm:.2f}, diameter={r_mm*2:.2f}")
+
+    stl_stats = None
+    if fem_indenter_geom == "stl":
+        stl_path = Path(args.object_file) if args.object_file else (_PROJECT_ROOT / "xengym" / "assets" / "obj" / "circle_r4.STL")
+        stl_stats = _analyze_binary_stl_endfaces_mm(stl_path) if stl_path.exists() else None
+        if stl_stats is not None:
+            try:
+                ymin = stl_stats["endfaces_mm"]["y_min"]
+                ymax = stl_stats["endfaces_mm"]["y_max"]
+                print(
+                    "Indenter STL endfaces (mm): "
+                    f"y_min size≈{ymin['size_x_mm']:.1f}x{ymin['size_z_mm']:.1f}, "
+                    f"y_max size≈{ymax['size_x_mm']:.1f}x{ymax['size_z_mm']:.1f}, "
+                    f"height≈{float(stl_stats['height_mm']):.1f}"
+                )
+            except Exception:
+                pass
     print(f"MPM marker: {args.mpm_marker}")
     if args.mpm_show_indenter:
         print("MPM indenter overlay: enabled")
@@ -1980,6 +2045,7 @@ def main():
         visible=True,
         save_dir=args.save_dir,
         fem_indenter_face=args.fem_indenter_face,
+        fem_indenter_geom=fem_indenter_geom,
     )
     engine.mpm_marker_mode = args.mpm_marker
     engine.mpm_show_indenter = args.mpm_show_indenter
@@ -1991,6 +2057,7 @@ def main():
         "resolved": {
             "square_indenter_size_mm": float(square_d_mm) if square_d_mm is not None else None,
             "indenter_stl": stl_stats,
+            "fem_indenter_geom": fem_indenter_geom,
         },
     }
     engine.run_comparison(fps=args.fps, record_interval=int(args.record_interval))
