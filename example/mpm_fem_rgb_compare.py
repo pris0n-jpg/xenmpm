@@ -17,7 +17,7 @@ Usage:
     python example/mpm_fem_rgb_compare.py --save-dir output/rgb_compare
 
     # Recommended baseline (stable, auditable output):
-    python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --save-dir output/rgb_compare/baseline
+    python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --fric 0.4 --save-dir output/rgb_compare/baseline
 
 Output (when --save-dir is set):
     - fem_XXXX.png / mpm_XXXX.png
@@ -165,6 +165,11 @@ SCENE_PARAMS = {
     'indenter_start_gap_mm': 0.5,       # initial clearance above gel
     'indenter_type': 'box',             # 'sphere' or 'box' (flat bottom)
     'indenter_half_extents_mm': None,   # Optional (x,y,z) for box mode; overrides indenter_radius_mm
+
+    # Contact / friction (explicit defaults for auditability)
+    'fem_fric_coef': 0.4,               # FEM fric_coef (single coefficient)
+    'mpm_mu_s': 2.0,                    # MPM static friction (mu_s)
+    'mpm_mu_k': 1.5,                    # MPM kinetic friction (mu_k)
 
     # Depth camera settings (for FEM path)
     'depth_img_size': (100, 175),       # matches demo_simple_sensor
@@ -489,6 +494,7 @@ class FEMRGBRenderer:
             visible=visible,
             title="FEM Sensor"
         )
+        self.sensor_sim.set_friction_coefficient(float(SCENE_PARAMS.get("fem_fric_coef", 0.4)))
 
         # Object pose (indenter position)
         self._object_y = 0.02  # initial y position (m)
@@ -1406,6 +1412,9 @@ class MPMSimulationAdapter:
         print(f"[MPM] Indenter: type={indenter_type}, z_half={indenter_z_half*1000:.1f}mm, "
               f"center=({indenter_center[0]*1000:.1f}, {indenter_center[1]*1000:.1f}, {indenter_center[2]*1000:.1f})mm")
 
+        mpm_mu_s = float(SCENE_PARAMS.get("mpm_mu_s", 2.0))
+        mpm_mu_k = float(SCENE_PARAMS.get("mpm_mu_k", 1.5))
+
         config = MPMConfig(
             grid=GridConfig(grid_size=grid_extent, dx=dx),
             time=TimeConfig(dt=SCENE_PARAMS['mpm_dt'], num_steps=1),
@@ -1423,8 +1432,8 @@ class MPMSimulationAdapter:
                 enable_contact=True,
                 contact_stiffness_normal=8e2,  # Balanced for stability and response
                 contact_stiffness_tangent=4e2,  # Good tangential coupling
-                mu_s=2.0,  # High static friction to drag material with indenter
-                mu_k=1.5,  # High kinetic friction
+                mu_s=mpm_mu_s,  # static friction
+                mu_k=mpm_mu_k,  # kinetic friction
                 obstacles=obstacles,
             ),
             output=OutputConfig()
@@ -1943,6 +1952,23 @@ def main():
         help='MPM indenter type: sphere (curved) or box (flat bottom, matches cylinder STL)'
     )
     parser.add_argument(
+        '--fric', type=float, default=None,
+        help=('Set friction for both FEM and MPM: FEM fric_coef and MPM mu_s/mu_k '
+              '(FEM uses a single coefficient; MPM uses static/kinetic).')
+    )
+    parser.add_argument(
+        '--fem-fric', type=float, default=None,
+        help='FEM friction coefficient (overrides fem_fric_coef)'
+    )
+    parser.add_argument(
+        '--mpm-mu-s', type=float, default=None,
+        help='MPM static friction coefficient mu_s (overrides --fric for MPM side)'
+    )
+    parser.add_argument(
+        '--mpm-mu-k', type=float, default=None,
+        help='MPM kinetic friction coefficient mu_k (overrides --fric for MPM side)'
+    )
+    parser.add_argument(
         '--mpm-marker', type=str, choices=['off', 'static', 'warp'], default='static',
         help='MPM marker rendering: off|static|warp (warp reflects stretch/shear from tangential displacement)'
     )
@@ -1973,11 +1999,39 @@ def main():
 
     args = parser.parse_args()
 
+    def _validate_nonneg(name: str, value: Optional[float]) -> bool:
+        if value is None:
+            return True
+        if float(value) < 0.0:
+            print(f"ERROR: {name} must be >= 0")
+            return False
+        return True
+
+    if not (
+        _validate_nonneg("--fric", args.fric)
+        and _validate_nonneg("--fem-fric", args.fem_fric)
+        and _validate_nonneg("--mpm-mu-s", args.mpm_mu_s)
+        and _validate_nonneg("--mpm-mu-k", args.mpm_mu_k)
+    ):
+        return 1
+
     # Update scene params from args
     SCENE_PARAMS['press_depth_mm'] = args.press_mm
     SCENE_PARAMS['slide_distance_mm'] = args.slide_mm
     SCENE_PARAMS['indenter_type'] = args.indenter_type
     SCENE_PARAMS['debug_verbose'] = args.debug
+
+    if args.fric is not None:
+        fric = float(args.fric)
+        SCENE_PARAMS["fem_fric_coef"] = fric
+        SCENE_PARAMS["mpm_mu_s"] = fric
+        SCENE_PARAMS["mpm_mu_k"] = fric
+    if args.fem_fric is not None:
+        SCENE_PARAMS["fem_fric_coef"] = float(args.fem_fric)
+    if args.mpm_mu_s is not None:
+        SCENE_PARAMS["mpm_mu_s"] = float(args.mpm_mu_s)
+    if args.mpm_mu_k is not None:
+        SCENE_PARAMS["mpm_mu_k"] = float(args.mpm_mu_k)
 
     if args.indenter_size_mm is not None:
         square_d_mm = float(args.indenter_size_mm)
@@ -2005,6 +2059,11 @@ def main():
     print(f"Press depth: {args.press_mm} mm")
     print(f"Slide distance: {args.slide_mm} mm")
     print(f"MPM indenter type: {args.indenter_type}")
+    fem_fric = float(SCENE_PARAMS.get("fem_fric_coef", 0.4))
+    mpm_mu_s = float(SCENE_PARAMS.get("mpm_mu_s", 2.0))
+    mpm_mu_k = float(SCENE_PARAMS.get("mpm_mu_k", 1.5))
+    aligned_fric = (abs(fem_fric - mpm_mu_s) < 1e-9) and (abs(fem_fric - mpm_mu_k) < 1e-9)
+    print(f"Friction: FEM fric_coef={fem_fric:.4g}, MPM mu_s={mpm_mu_s:.4g}, mu_k={mpm_mu_k:.4g}, aligned={aligned_fric}")
 
     fem_indenter_geom = args.fem_indenter_geom
     if fem_indenter_geom == "auto":
@@ -2094,6 +2153,12 @@ def main():
             "square_indenter_size_mm": float(square_d_mm) if square_d_mm is not None else None,
             "indenter_stl": stl_stats,
             "fem_indenter_geom": fem_indenter_geom,
+            "friction": {
+                "fem_fric_coef": float(fem_fric),
+                "mpm_mu_s": float(mpm_mu_s),
+                "mpm_mu_k": float(mpm_mu_k),
+                "aligned": bool(aligned_fric),
+            },
         },
     }
     engine.run_comparison(fps=args.fps, record_interval=int(args.record_interval))
