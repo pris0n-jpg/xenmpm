@@ -24,7 +24,7 @@
 5. **渲染策略差异在放大观感差异**  
    - MPM 侧默认对纹理做 depth tint（压暗 G/B、增强 R）`example/mpm_fem_rgb_compare.py:987-1028,1049-1050`  
    - MPM marker 默认 `static`（不随面内位移移动），而 FEM marker 是“跟着网格/深度投影走”的（语义不同）`example/mpm_fem_rgb_compare.py:1632-1634`  
-6. **log 里 FEM Frame 0~7 再出现一次不是“重复跑仿真”**  
+6. **log 里 FEM Frame 0~7 再出现一次不是“重复跑仿真”**
    - UI 循环播放：`frame_idx = (frame_idx + 1) % total_frames` `example/mpm_fem_rgb_compare.py:1572`
 
 ---
@@ -186,6 +186,28 @@ MPM 侧会在每帧对纹理叠加按压深度的红色热度（并压暗 G/B）
 
 ---
 
+## 快速回归与推荐基线
+
+### 1) 快速回归（本机可跑）
+
+在不具备 Taichi/ezgl 的环境中，也可以先跑 smoke 来锁定关键不变量（几何/摩擦/坐标/开关存在且可解析）：
+
+- `python quick_test.py`
+
+### 2) 推荐基线命令（用于可审计输出）
+
+当环境具备依赖（Taichi + ezgl）时，建议使用下面命令产出可追溯的对比输出：
+
+- `python example/mpm_fem_rgb_compare.py --mode raw --record-interval 5 --fric 0.4 --mpm-marker warp --mpm-depth-tint off --export-intermediate --save-dir output/rgb_compare/baseline`
+
+输出目录（`--save-dir`）会包含：
+
+- `run_manifest.json`：生效参数 + frame→phase 映射（审计入口）
+- `metrics.csv` / `metrics.json`：逐帧 RGB 差异指标（MAE/percentiles 等）
+- `intermediate/frame_XXXX.npz`：逐帧中间产物（height_field/uv_disp/contact_mask 等，按需启用）
+
+---
+
 ## 7) 次要但值得确认的不对齐项（可能继续“污染”差异来源）
 
 1. **FEM 侧 log/说明与实际不一致**  
@@ -223,4 +245,3 @@ MPM 侧会在每帧对纹理叠加按压深度的红色热度（并压暗 G/B）
   - MPM obstacle center（x,y,z）与 `frame_controls`（dz, dx_slide）
   - FEM object_pose（x,y,z）
 - 是否启用了 `--mpm-marker warp`、是否启用了 `--mpm-show-indenter`
-
