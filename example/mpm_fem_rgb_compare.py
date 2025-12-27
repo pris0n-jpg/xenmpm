@@ -1842,6 +1842,18 @@ class RGBComparisonEngine:
                 for i, (press_m, slide_m) in enumerate(self.mpm_sim.frame_controls)
             ]
 
+        frame_indenter_centers = None
+        if self.mpm_sim and getattr(self.mpm_sim, "frame_indenter_centers_m", None):
+            centers = self.mpm_sim.frame_indenter_centers_m
+            if centers:
+                frame_indenter_centers = [
+                    {
+                        "frame": int(i),
+                        "center_m": [float(cx), float(cy), float(cz)],
+                    }
+                    for i, (cx, cy, cz) in enumerate(centers)
+                ]
+
         manifest = {
             "created_at": datetime.datetime.now().astimezone().isoformat(),
             "argv": list(sys.argv),
@@ -1863,6 +1875,7 @@ class RGBComparisonEngine:
                 "frame_to_step": frame_to_step,
                 "frame_to_phase": frame_to_phase,
                 "frame_controls": frame_controls,
+                "frame_indenter_centers_m": frame_indenter_centers,
             },
             "outputs": {
                 "frames_glob": {
@@ -2511,6 +2524,14 @@ def main():
                     "contact_face_key": fem_contact_face_key,
                     "contact_face_size_mm": fem_contact_face_size_mm,
                 },
+            },
+            "conventions": {
+                "mpm_height_field_flip_x": True,
+                "mpm_uv_disp_flip_x": True,
+                "mpm_uv_disp_u_negate": True,
+                "mpm_warp_flip_x": True,
+                "mpm_warp_flip_y": True,
+                "mpm_overlay_flip_x_mm": True,
             },
             "friction": {
                 "fem_fric_coef": float(fem_fric),

@@ -144,6 +144,18 @@ def main() -> int:
             return _fail(f"Unexpected total_frames in run_manifest.json: {traj.get('total_frames')}")
         if len(traj.get("frame_to_phase") or []) != total_frames:
             return _fail("run_manifest.json frame_to_phase length mismatch total_frames")
+        resolved = (manifest.get("run_context") or {}).get("resolved") or {}
+        conv = resolved.get("conventions") or {}
+        for key in [
+            "mpm_height_field_flip_x",
+            "mpm_uv_disp_flip_x",
+            "mpm_uv_disp_u_negate",
+            "mpm_warp_flip_x",
+            "mpm_warp_flip_y",
+            "mpm_overlay_flip_x_mm",
+        ]:
+            if key not in conv:
+                return _fail(f"run_manifest.json missing conventions.{key}")
 
     # 8) FEM STL tip/base selection should be auditable via resolved contact face size.
     with tempfile.TemporaryDirectory() as tmp_dir_str:
