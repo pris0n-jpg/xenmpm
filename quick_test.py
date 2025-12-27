@@ -178,7 +178,17 @@ def main() -> int:
         text=True,
     )
     help_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    for flag in ["--fric", "--fem-marker", "--mpm-marker", "--mpm-depth-tint", "--export-intermediate"]:
+    for flag in [
+        "--fric",
+        "--fem-marker",
+        "--mpm-marker",
+        "--mpm-depth-tint",
+        "--mpm-height-fill-holes",
+        "--mpm-height-fill-holes-iters",
+        "--mpm-height-smooth",
+        "--mpm-height-smooth-iters",
+        "--export-intermediate",
+    ]:
         if flag not in help_text:
             return _fail(f"Missing CLI flag in --help output: {flag}")   
 
@@ -231,9 +241,64 @@ def main() -> int:
             "mpm_warp_flip_x",
             "mpm_warp_flip_y",
             "mpm_overlay_flip_x_mm",
+            "mpm_height_fill_holes",
+            "mpm_height_fill_holes_iters",
+            "mpm_height_smooth",
+            "mpm_height_smooth_iters",
         ]:
             if key not in conv:
                 return _fail(f"run_manifest.json missing conventions.{key}")
+        if conv.get("mpm_height_fill_holes") is not False:
+            return _fail(f"Unexpected default conventions.mpm_height_fill_holes: {conv}")
+        if conv.get("mpm_height_smooth") is not True:
+            return _fail(f"Unexpected default conventions.mpm_height_smooth: {conv}")
+
+    # 7d) Height-field postprocess toggles should be captured in manifest.
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--mode",
+                "raw",
+                "--record-interval",
+                "5",
+                "--save-dir",
+                str(tmp_dir),
+                "--mpm-height-fill-holes",
+                "on",
+                "--mpm-height-fill-holes-iters",
+                "7",
+                "--mpm-height-smooth",
+                "off",
+                "--mpm-height-smooth-iters",
+                "0",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        _ = proc.returncode
+        manifest_path = tmp_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            return _fail("Missing run_manifest.json in height postprocess preflight run")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return _fail(f"Failed to parse run_manifest.json (height postprocess run): {e}")
+        resolved = (manifest.get("run_context") or {}).get("resolved") or {}
+        conv = resolved.get("conventions") or {}
+        if conv.get("mpm_height_fill_holes") is not True:
+            return _fail(f"Unexpected conventions.mpm_height_fill_holes: {conv}")
+        if int(conv.get("mpm_height_fill_holes_iters") or 0) != 7:
+            return _fail(f"Unexpected conventions.mpm_height_fill_holes_iters: {conv}")
+        if conv.get("mpm_height_smooth") is not False:
+            return _fail(f"Unexpected conventions.mpm_height_smooth: {conv}")
+        try:
+            if int(conv.get("mpm_height_smooth_iters")) != 0:
+                return _fail(f"Unexpected conventions.mpm_height_smooth_iters: {conv}")
+        except Exception:
+            return _fail(f"Unexpected conventions.mpm_height_smooth_iters: {conv}")
 
     # 7c) Marker/tint toggles should be reflected in run_manifest.json.
     with tempfile.TemporaryDirectory() as tmp_dir_str:

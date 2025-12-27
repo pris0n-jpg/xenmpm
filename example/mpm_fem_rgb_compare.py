@@ -143,6 +143,12 @@ SCENE_PARAMS = {
     # Height field grid resolution (matches SensorScene)
     'height_grid_shape': (140, 80),     # (n_row, n_col)
 
+    # Height-field postprocess (MPM -> render)
+    'mpm_height_fill_holes': False,     # fill empty cells via diffusion (off by default for compatibility)
+    'mpm_height_fill_holes_iters': 10,  # iterations for hole filling
+    'mpm_height_smooth': True,          # apply box smoothing before rendering
+    'mpm_height_smooth_iters': 2,       # matches previous hardcoded behavior
+
     # Trajectory parameters
     'press_depth_mm': 2.0,              # target indentation depth (increased for better friction coupling)
     'slide_distance_mm': 3.0,           # tangential travel (x direction)
@@ -357,6 +363,63 @@ def _fill_uv_holes(uv: np.ndarray, valid_mask: np.ndarray, max_iterations: int =
         result[fill_mask] = neighbor_sum[fill_mask] / neighbor_weight[fill_mask][..., None]
         filled[fill_mask] = True
 
+    return result
+
+
+def _fill_height_holes(height_mm: np.ndarray, valid_mask: np.ndarray, max_iterations: int = 10) -> np.ndarray:
+    """
+    使用扩散法填充高度场中的空洞（无粒子覆盖的网格单元）。
+
+    Args:
+        height_mm: (H,W) 高度场（mm，<=0 表示压入）
+        valid_mask: (H,W) bool，True 表示该单元有有效数据
+        max_iterations: 最大扩散迭代次数
+
+    Returns:
+        填充后的高度场 (H,W)
+    """
+    if height_mm.ndim != 2:
+        raise ValueError("height_mm must be (H,W)")
+    if valid_mask.shape != height_mm.shape:
+        raise ValueError("valid_mask shape must match height_mm")
+
+    result = height_mm.astype(np.float32, copy=True)
+    filled = valid_mask.copy()
+
+    for _ in range(max(max_iterations, 0)):
+        if filled.all():
+            break
+
+        padded_filled = np.pad(filled.astype(np.float32), ((1, 1), (1, 1)), mode="constant", constant_values=0)
+        neighbor_count = (
+            padded_filled[0:-2, 0:-2] + padded_filled[0:-2, 1:-1] + padded_filled[0:-2, 2:] +
+            padded_filled[1:-1, 0:-2] +                            padded_filled[1:-1, 2:] +
+            padded_filled[2:, 0:-2]   + padded_filled[2:, 1:-1]   + padded_filled[2:, 2:]
+        )
+
+        can_fill = (~filled) & (neighbor_count > 0)
+        if not can_fill.any():
+            break
+
+        padded_h = np.pad(result, ((1, 1), (1, 1)), mode="constant", constant_values=0)
+        padded_mask = np.pad(filled.astype(np.float32), ((1, 1), (1, 1)), mode="constant", constant_values=0)
+
+        neighbor_sum = np.zeros_like(result)
+        neighbor_weight = np.zeros_like(result, dtype=np.float32)
+
+        for di, dj in [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]:
+            i_slice = slice(1 + di, result.shape[0] + 1 + di)
+            j_slice = slice(1 + dj, result.shape[1] + 1 + dj)
+            w = padded_mask[i_slice, j_slice]
+            neighbor_sum += padded_h[i_slice, j_slice] * w
+            neighbor_weight += w
+
+        fill_mask = can_fill & (neighbor_weight > 0)
+        result[fill_mask] = neighbor_sum[fill_mask] / neighbor_weight[fill_mask]
+        filled[fill_mask] = True
+
+    # Remaining holes (if any) are set to 0mm (flat), consistent with previous behavior.
+    result[~filled] = 0.0
     return result
 
 
@@ -938,21 +1001,31 @@ class MPMHeightFieldRenderer:
                     height_field[row, col] = z_disp
 
         empty_mask = ~np.isfinite(height_field)
+        valid_mask = ~empty_mask
         height_field[empty_mask] = 0.0
 
-        # CRITICAL: Use EDGE regions as fixed spatial reference for better contrast
-        # This preserves slide motion (unlike global percentile which cancels it)
+        if bool(SCENE_PARAMS.get("mpm_height_fill_holes", False)):
+            iters = int(SCENE_PARAMS.get("mpm_height_fill_holes_iters", 10))
+            if iters > 0:
+                try:
+                    height_field = _fill_height_holes(height_field, valid_mask, max_iterations=iters)
+                except Exception:
+                    pass
+
+        # CRITICAL: Use EDGE regions as fixed spatial reference for better contrast.
+        # This preserves slide motion (unlike global percentile which cancels it).
+        # Use original valid cells for baseline to avoid bias from hole-filling.
         edge_margin = max(3, n_row // 20)  # ~5% margin or at least 3 rows/cols
-        edge_values = []
-        # Top and bottom edges
-        edge_values.append(height_field[:edge_margin, :].ravel())
-        edge_values.append(height_field[-edge_margin:, :].ravel())
-        # Left and right edges (excluding corners already counted)
-        edge_values.append(height_field[edge_margin:-edge_margin, :edge_margin].ravel())
-        edge_values.append(height_field[edge_margin:-edge_margin, -edge_margin:].ravel())
-        edge_values = np.concatenate(edge_values)
+        edge_mask = np.zeros_like(valid_mask, dtype=bool)
+        edge_mask[:edge_margin, :] = True
+        edge_mask[-edge_margin:, :] = True
+        if edge_margin * 2 < n_row and edge_margin * 2 < n_col:
+            edge_mask[edge_margin:-edge_margin, :edge_margin] = True
+            edge_mask[edge_margin:-edge_margin, -edge_margin:] = True
+
+        edge_values = height_field[edge_mask & valid_mask]
         edge_valid = edge_values[np.isfinite(edge_values) & (edge_values > -10)]  # filter outliers
-        if len(edge_valid) > 0:
+        if edge_valid.size > 0:
             reference_z = float(np.median(edge_valid))  # Median is robust to outliers
             height_field = height_field - reference_z  # Now center region depression is negative
 
@@ -1068,12 +1141,14 @@ class MPMHeightFieldRenderer:
             else:
                 print(f"[MPM RENDER] WARNING: No negative values in height_field! "
                       f"range=[{height_field_mm.min():.4f}, {height_field_mm.max():.4f}]")
-        self.scene.set_height_field(height_field_mm)
+        smooth = bool(SCENE_PARAMS.get("mpm_height_smooth", True))
+        self.scene.set_height_field(height_field_mm, smooth=smooth)
         return self.scene.get_image()
 
     def get_diff_image(self, height_field_mm: np.ndarray) -> np.ndarray:
         """Get diff image relative to flat reference"""
-        self.scene.set_height_field(height_field_mm)
+        smooth = bool(SCENE_PARAMS.get("mpm_height_smooth", True))
+        self.scene.set_height_field(height_field_mm, smooth=smooth)
         return self.scene.get_diff_image()
 
     def update(self):
@@ -1357,7 +1432,9 @@ class MPMSensorScene(Scene):
     def set_height_field(self, height_field_mm: np.ndarray, smooth: bool = True):
         """Update surface mesh with height field data"""
         if smooth:
-            height_field_mm = self._box_blur_2d(height_field_mm, iterations=2)
+            iters = int(SCENE_PARAMS.get("mpm_height_smooth_iters", 2))
+            if iters > 0:
+                height_field_mm = self._box_blur_2d(height_field_mm, iterations=iters)
 
         # CRITICAL: Flip horizontally to match mesh x_range convention
         # Height field: col=0 is x=-gel_w/2 (left)
@@ -2317,6 +2394,22 @@ def main():
         help='MPM depth tint overlay on marker texture: on|off'
     )
     parser.add_argument(
+        '--mpm-height-fill-holes', type=str, choices=['on', 'off'], default='off',
+        help='MPM height_field hole filling (diffusion) before rendering: on|off'
+    )
+    parser.add_argument(
+        '--mpm-height-fill-holes-iters', type=int, default=int(SCENE_PARAMS.get("mpm_height_fill_holes_iters", 10)),
+        help='Iterations for --mpm-height-fill-holes (default: 10)'
+    )
+    parser.add_argument(
+        '--mpm-height-smooth', type=str, choices=['on', 'off'], default='on',
+        help='MPM height_field smoothing before rendering: on|off'
+    )
+    parser.add_argument(
+        '--mpm-height-smooth-iters', type=int, default=int(SCENE_PARAMS.get("mpm_height_smooth_iters", 2)),
+        help='Box blur iterations for --mpm-height-smooth (default: 2)'
+    )
+    parser.add_argument(
         '--mpm-show-indenter', action='store_true', default=False,
         help='Overlay MPM indenter projection in the RGB view (2D overlay)'
     )
@@ -2370,12 +2463,22 @@ def main():
     if int(args.export_intermediate_every) <= 0:
         print("ERROR: --export-intermediate-every must be a positive integer")
         return 1
+    if int(args.mpm_height_fill_holes_iters) < 0:
+        print("ERROR: --mpm-height-fill-holes-iters must be >= 0")
+        return 1
+    if int(args.mpm_height_smooth_iters) < 0:
+        print("ERROR: --mpm-height-smooth-iters must be >= 0")
+        return 1
 
     # Update scene params from args
     SCENE_PARAMS['press_depth_mm'] = args.press_mm
     SCENE_PARAMS['slide_distance_mm'] = args.slide_mm
     SCENE_PARAMS['indenter_type'] = args.indenter_type
     SCENE_PARAMS['debug_verbose'] = args.debug
+    SCENE_PARAMS["mpm_height_fill_holes"] = (str(args.mpm_height_fill_holes).lower().strip() == "on")
+    SCENE_PARAMS["mpm_height_fill_holes_iters"] = int(args.mpm_height_fill_holes_iters)
+    SCENE_PARAMS["mpm_height_smooth"] = (str(args.mpm_height_smooth).lower().strip() != "off")
+    SCENE_PARAMS["mpm_height_smooth_iters"] = int(args.mpm_height_smooth_iters)
 
     if args.fric is not None:
         fric = float(args.fric)
@@ -2506,6 +2609,13 @@ def main():
     print(f"MPM marker: {args.mpm_marker}")
     print(f"FEM marker: {args.fem_marker}")
     print(f"MPM depth tint: {args.mpm_depth_tint}")
+    print(
+        "MPM height_field: "
+        f"fill_holes={bool(SCENE_PARAMS.get('mpm_height_fill_holes', False))} "
+        f"(iters={int(SCENE_PARAMS.get('mpm_height_fill_holes_iters', 0))}), "
+        f"smooth={bool(SCENE_PARAMS.get('mpm_height_smooth', True))} "
+        f"(iters={int(SCENE_PARAMS.get('mpm_height_smooth_iters', 0))})"
+    )
     if args.mpm_show_indenter:
         print("MPM indenter overlay: enabled")
     if args.steps:
@@ -2551,6 +2661,10 @@ def main():
                 "mpm_warp_flip_x": True,
                 "mpm_warp_flip_y": True,
                 "mpm_overlay_flip_x_mm": True,
+                "mpm_height_fill_holes": bool(SCENE_PARAMS.get("mpm_height_fill_holes", False)),
+                "mpm_height_fill_holes_iters": int(SCENE_PARAMS.get("mpm_height_fill_holes_iters", 0)),
+                "mpm_height_smooth": bool(SCENE_PARAMS.get("mpm_height_smooth", True)),
+                "mpm_height_smooth_iters": int(SCENE_PARAMS.get("mpm_height_smooth_iters", 0)),
             },
             "friction": {
                 "fem_fric_coef": float(fem_fric),
