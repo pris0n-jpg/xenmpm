@@ -1791,6 +1791,7 @@ class RGBComparisonEngine:
 
         if HAS_TAICHI:
             self.mpm_sim = MPMSimulationAdapter()
+        self.fem_show_marker = True
         self.mpm_marker_mode = "static"
         self.mpm_depth_tint = True
         self.mpm_show_indenter = False
@@ -1804,6 +1805,18 @@ class RGBComparisonEngine:
         self._exported_intermediate_frames = set()
         self._metrics_rows = []
         self._frame_to_phase: Optional[List[str]] = None
+
+    def set_fem_show_marker(self, show: bool) -> None:
+        self.fem_show_marker = bool(show)
+        if self.fem_renderer is None:
+            return
+        sim = getattr(self.fem_renderer, "sensor_sim", None)
+        if sim is None:
+            return
+        try:
+            sim.set_show_marker(self.fem_show_marker)
+        except Exception:
+            pass
 
     def _write_run_manifest(self, record_interval: int, total_frames: int) -> None:
         if not self.save_dir:
@@ -2291,6 +2304,10 @@ def main():
         help='MPM kinetic friction coefficient mu_k (overrides --fric for MPM side)'
     )
     parser.add_argument(
+        '--fem-marker', type=str, choices=['on', 'off'], default='on',
+        help='FEM marker rendering: on|off (off = white background for shading comparison)'
+    )
+    parser.add_argument(
         '--mpm-marker', type=str, choices=['off', 'static', 'warp'], default='static',
         help='MPM marker rendering: off|static|warp (warp reflects stretch/shear from tangential displacement)'
     )
@@ -2486,6 +2503,7 @@ def main():
             except Exception:
                 pass
     print(f"MPM marker: {args.mpm_marker}")
+    print(f"FEM marker: {args.fem_marker}")
     print(f"MPM depth tint: {args.mpm_depth_tint}")
     if args.mpm_show_indenter:
         print("MPM indenter overlay: enabled")
@@ -2541,6 +2559,7 @@ def main():
             },
             "render": {
                 "mpm_marker": str(args.mpm_marker),
+                "fem_marker": str(args.fem_marker),
                 "mpm_depth_tint": bool(str(args.mpm_depth_tint).lower().strip() != "off"),
             },
             "scale": {
@@ -2591,6 +2610,7 @@ def main():
     )
     engine.mpm_marker_mode = args.mpm_marker
     engine.mpm_depth_tint = (str(args.mpm_depth_tint).lower().strip() != "off")
+    engine.set_fem_show_marker(str(args.fem_marker).lower().strip() != "off")
     engine.mpm_show_indenter = args.mpm_show_indenter
     engine.mpm_debug_overlay = args.mpm_debug_overlay
     engine.export_intermediate = bool(args.export_intermediate)

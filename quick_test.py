@@ -104,9 +104,9 @@ def main() -> int:
         text=True,
     )
     help_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    for flag in ["--fric", "--mpm-depth-tint", "--export-intermediate"]:   
+    for flag in ["--fric", "--fem-marker", "--mpm-marker", "--mpm-depth-tint", "--export-intermediate"]:
         if flag not in help_text:
-            return _fail(f"Missing CLI flag in --help output: {flag}")     
+            return _fail(f"Missing CLI flag in --help output: {flag}")   
 
     # 7) Preflight run manifest should be written even without ezgl/taichi
     #    (keeps outputs auditable in dependency-light environments).
@@ -145,6 +145,10 @@ def main() -> int:
         if len(traj.get("frame_to_phase") or []) != total_frames:
             return _fail("run_manifest.json frame_to_phase length mismatch total_frames")
         resolved = (manifest.get("run_context") or {}).get("resolved") or {}
+        render = resolved.get("render") or {}
+        for key in ["mpm_marker", "mpm_depth_tint", "fem_marker"]:
+            if key not in render:
+                return _fail(f"run_manifest.json missing resolved.render.{key}")
         conv = resolved.get("conventions") or {}
         for key in [
             "mpm_height_field_flip_x",
@@ -156,6 +160,46 @@ def main() -> int:
         ]:
             if key not in conv:
                 return _fail(f"run_manifest.json missing conventions.{key}")
+
+    # 7c) Marker/tint toggles should be reflected in run_manifest.json.
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--mode",
+                "raw",
+                "--record-interval",
+                "5",
+                "--save-dir",
+                str(tmp_dir),
+                "--fem-marker",
+                "off",
+                "--mpm-marker",
+                "off",
+                "--mpm-depth-tint",
+                "off",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        _ = proc.returncode
+        manifest_path = tmp_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            return _fail("Missing run_manifest.json in marker/tint preflight run")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return _fail(f"Failed to parse run_manifest.json (marker/tint run): {e}")
+        resolved = (manifest.get("run_context") or {}).get("resolved") or {}
+        render = resolved.get("render") or {}
+        if str(render.get("fem_marker") or "") != "off":
+            return _fail(f"Unexpected render.fem_marker: {render}")
+        if str(render.get("mpm_marker") or "") != "off":
+            return _fail(f"Unexpected render.mpm_marker: {render}")
+        if render.get("mpm_depth_tint") is not False:
+            return _fail(f"Unexpected render.mpm_depth_tint: {render}")
 
     # 7b) --fric should align FEM fric_coef and MPM mu_s/mu_k and be
     #     reflected in run_manifest.json.
