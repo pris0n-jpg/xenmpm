@@ -2418,19 +2418,30 @@ def main():
         print(f"FEM indenter face: {args.fem_indenter_face}")
 
     # Print effective indenter size (MPM vs FEM) for auditability.
+    mpm_indenter_size: Optional[Dict[str, object]] = None
     if args.indenter_type == "box":
         half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
         if half_extents_mm is None:
             r_mm = float(SCENE_PARAMS["indenter_radius_mm"])
             half_extents_mm = (r_mm, r_mm, r_mm)
         hx_mm, hy_mm, hz_mm = [float(v) for v in half_extents_mm]
+        mpm_indenter_size = {
+            "half_extents_mm": [float(hx_mm), float(hy_mm), float(hz_mm)],
+            "full_extents_mm": [float(hx_mm * 2.0), float(hy_mm * 2.0), float(hz_mm * 2.0)],
+        }
         print(f"Indenter size (box, mm): half_extents=({hx_mm:.2f}, {hy_mm:.2f}, {hz_mm:.2f}), "
               f"full=({hx_mm*2:.2f}, {hy_mm*2:.2f}, {hz_mm*2:.2f})")
     else:
         r_mm = float(SCENE_PARAMS["indenter_radius_mm"])
+        mpm_indenter_size = {
+            "radius_mm": float(r_mm),
+            "diameter_mm": float(r_mm * 2.0),
+        }
         print(f"Indenter size (sphere, mm): radius={r_mm:.2f}, diameter={r_mm*2:.2f}")
 
     stl_stats = None
+    fem_contact_face_key = None
+    fem_contact_face_size_mm = None
     if fem_indenter_geom == "stl":
         stl_path = Path(args.object_file) if args.object_file else (_PROJECT_ROOT / "xengym" / "assets" / "obj" / "circle_r4.STL")
         stl_stats = _analyze_binary_stl_endfaces_mm(stl_path) if stl_path.exists() else None
@@ -2444,6 +2455,21 @@ def main():
                     f"y_max size≈{ymax['size_x_mm']:.1f}x{ymax['size_z_mm']:.1f}, "
                     f"height≈{float(stl_stats['height_mm']):.1f}"
                 )
+            except Exception:
+                pass
+            try:
+                fem_contact_face_key = "y_max" if str(args.fem_indenter_face).lower().strip() == "tip" else "y_min"
+                endfaces = stl_stats.get("endfaces_mm") if isinstance(stl_stats, dict) else None
+                endface = endfaces.get(fem_contact_face_key) if isinstance(endfaces, dict) else None
+                if isinstance(endface, dict):
+                    fem_contact_face_size_mm = {
+                        "size_x_mm": float(endface.get("size_x_mm", 0.0)),
+                        "size_z_mm": float(endface.get("size_z_mm", 0.0)),
+                    }
+                    print(
+                        f"FEM contact face ({args.fem_indenter_face}/{fem_contact_face_key}) "
+                        f"size≈{fem_contact_face_size_mm['size_x_mm']:.1f}x{fem_contact_face_size_mm['size_z_mm']:.1f}mm"
+                    )
             except Exception:
                 pass
     print(f"MPM marker: {args.mpm_marker}")
@@ -2474,6 +2500,18 @@ def main():
             "square_indenter_size_mm": float(square_d_mm) if square_d_mm is not None else None,
             "indenter_stl": stl_stats,
             "fem_indenter_geom": fem_indenter_geom,
+            "indenter": {
+                "mpm": {
+                    "type": str(args.indenter_type),
+                    "size_mm": mpm_indenter_size,
+                },
+                "fem": {
+                    "geom": str(fem_indenter_geom),
+                    "face": str(args.fem_indenter_face),
+                    "contact_face_key": fem_contact_face_key,
+                    "contact_face_size_mm": fem_contact_face_size_mm,
+                },
+            },
             "friction": {
                 "fem_fric_coef": float(fem_fric),
                 "mpm_mu_s": float(mpm_mu_s),

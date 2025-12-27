@@ -145,6 +145,48 @@ def main() -> int:
         if len(traj.get("frame_to_phase") or []) != total_frames:
             return _fail("run_manifest.json frame_to_phase length mismatch total_frames")
 
+    # 8) FEM STL tip/base selection should be auditable via resolved contact face size.
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--mode",
+                "raw",
+                "--record-interval",
+                "5",
+                "--save-dir",
+                str(tmp_dir),
+                "--fem-indenter-geom",
+                "stl",
+                "--fem-indenter-face",
+                "tip",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        _ = proc.returncode
+        manifest_path = tmp_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            return _fail("Missing run_manifest.json for fem-indenter-face tip run")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return _fail(f"Failed to parse run_manifest.json (tip run): {e}")
+        resolved = (manifest.get("run_context") or {}).get("resolved") or {}
+        fem = (resolved.get("indenter") or {}).get("fem") or {}
+        face_key = str(fem.get("contact_face_key") or "")
+        if face_key != "y_max":
+            return _fail(f"Unexpected fem contact_face_key: {face_key} (expected y_max for tip)")
+        face_size = fem.get("contact_face_size_mm") or {}
+        try:
+            size_x = float(face_size.get("size_x_mm") or 0.0)
+        except Exception:
+            size_x = 0.0
+        if abs(size_x - 8.0) > 1.0:
+            return _fail(f"Unexpected fem tip contact size_x_mm: {size_x} (expected ~8mm)")
+
     print("OK: quick_test", flush=True)
     return 0
 
