@@ -157,6 +157,45 @@ def main() -> int:
             if key not in conv:
                 return _fail(f"run_manifest.json missing conventions.{key}")
 
+    # 7b) --fric should align FEM fric_coef and MPM mu_s/mu_k and be
+    #     reflected in run_manifest.json.
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--mode",
+                "raw",
+                "--record-interval",
+                "5",
+                "--save-dir",
+                str(tmp_dir),
+                "--fric",
+                "0.4",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        _ = proc.returncode
+        manifest_path = tmp_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            return _fail("Missing run_manifest.json in --fric preflight run")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return _fail(f"Failed to parse run_manifest.json (--fric run): {e}")
+        resolved = (manifest.get("run_context") or {}).get("resolved") or {}
+        friction = resolved.get("friction") or {}
+        if friction.get("aligned") is not True:
+            return _fail(f"Expected resolved.friction.aligned=true, got: {friction}")
+        for key in ["fem_fric_coef", "mpm_mu_s", "mpm_mu_k"]:
+            try:
+                if abs(float(friction.get(key)) - 0.4) > 1e-6:
+                    return _fail(f"Unexpected {key} in friction: {friction}")
+            except Exception:
+                return _fail(f"Invalid {key} in friction: {friction}")
+
     # 8) FEM STL tip/base selection should be auditable via resolved contact face size.
     with tempfile.TemporaryDirectory() as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
