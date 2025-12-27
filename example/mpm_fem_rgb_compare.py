@@ -2007,10 +2007,11 @@ class RGBComparisonEngine:
 
         payload: Dict[str, object] = {"frame": np.array(int(frame), dtype=np.int32)}
         if mpm_height_field_mm is not None:
-            payload["mpm_height_field_mm"] = mpm_height_field_mm.astype(np.float32, copy=False)
-            payload["mpm_contact_mask_u8"] = (mpm_height_field_mm < -0.01).astype(np.uint8, copy=False)
+            height_field_mm = mpm_height_field_mm.astype(np.float32, copy=False)
+            payload["height_field_mm"] = height_field_mm
+            payload["contact_mask"] = (height_field_mm < -0.01).astype(np.uint8, copy=False)
         if mpm_uv_disp_mm is not None:
-            payload["mpm_uv_disp_mm"] = mpm_uv_disp_mm.astype(np.float32, copy=False)
+            payload["uv_disp_mm"] = mpm_uv_disp_mm.astype(np.float32, copy=False)
         if fem_depth_mm is not None:
             payload["fem_depth_mm"] = fem_depth_mm.astype(np.float32, copy=False)
         if fem_marker_disp is not None:
@@ -2337,7 +2338,7 @@ def main():
     )
     parser.add_argument(
         '--export-intermediate', action='store_true', default=False,
-        help='Export intermediate arrays (height_field/uv_disp/contact_mask) to --save-dir/intermediate (npz)'
+        help='Export intermediate arrays (height_field_mm/uv_disp_mm/contact_mask) to --save-dir/intermediate (npz)'
     )
     parser.add_argument(
         '--export-intermediate-every', type=int, default=1,

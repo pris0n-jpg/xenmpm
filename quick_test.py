@@ -8,6 +8,7 @@ Run:
 
 from __future__ import annotations
 
+import csv
 import json
 import py_compile
 import runpy
@@ -50,6 +51,7 @@ def main() -> int:
         "_mpm_flip_x_mm",
         "_compute_rgb_diff_metrics",
         "MPMSensorScene",
+        "RGBComparisonEngine",
     ]
     for name in required:
         if name not in module:
@@ -84,6 +86,78 @@ def main() -> int:
     metrics = metrics_fn(a, b)
     if float(metrics.get("mae", -1.0)) != 10.0 or float(metrics.get("max_abs", -1.0)) != 10.0:
         return _fail(f"Unexpected metrics output: {metrics}")
+
+    # 4b) Intermediate/metrics file invariants (dependency-light)
+    engine_cls = module["RGBComparisonEngine"]
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        engine = engine_cls(
+            fem_file="dummy.npz",
+            object_file=None,
+            mode="raw",
+            visible=False,
+            save_dir=str(tmp_dir),
+        )
+        height_field_mm = np.zeros((140, 80), dtype=np.float32)
+        height_field_mm[0, 0] = -0.02
+        uv_disp_mm = np.zeros((140, 80, 2), dtype=np.float32)
+        engine._export_intermediate_frame(
+            frame=0,
+            mpm_height_field_mm=height_field_mm,
+            mpm_uv_disp_mm=uv_disp_mm,
+            fem_depth_mm=None,
+            fem_marker_disp=None,
+            fem_contact_mask_u8=None,
+        )
+        out_path = tmp_dir / "intermediate" / "frame_0000.npz"
+        if not out_path.exists():
+            return _fail("Missing intermediate/frame_0000.npz after export")
+        try:
+            loaded = np.load(out_path)
+        except Exception as e:
+            return _fail(f"Failed to load exported npz: {e}")
+        for key in ["frame", "height_field_mm", "uv_disp_mm", "contact_mask"]:
+            if key not in loaded:
+                return _fail(f"Missing key in exported npz: {key}")
+        if loaded["height_field_mm"].shape != (140, 80):
+            return _fail(f"Unexpected height_field_mm shape: {loaded['height_field_mm'].shape}")
+        if loaded["uv_disp_mm"].shape != (140, 80, 2):
+            return _fail(f"Unexpected uv_disp_mm shape: {loaded['uv_disp_mm'].shape}")
+        if loaded["contact_mask"].shape != (140, 80):
+            return _fail(f"Unexpected contact_mask shape: {loaded['contact_mask'].shape}")
+        if int(loaded["contact_mask"][0, 0]) != 1:
+            return _fail("contact_mask[0,0] should be 1 for negative height")
+        loaded.close()
+
+        engine._metrics_rows = [
+            {
+                "frame": 0,
+                "phase": "press",
+                "mode": "raw",
+                "mae": 1.0,
+                "mae_r": 1.0,
+                "mae_g": 1.0,
+                "mae_b": 1.0,
+                "max_abs": 2.0,
+                "p50": 1.0,
+                "p90": 2.0,
+                "p99": 2.0,
+            }
+        ]
+        engine._write_metrics_files()
+        metrics_csv = tmp_dir / "metrics.csv"
+        metrics_json = tmp_dir / "metrics.json"
+        if not metrics_csv.exists():
+            return _fail("Missing metrics.csv after _write_metrics_files")
+        if not metrics_json.exists():
+            return _fail("Missing metrics.json after _write_metrics_files")
+        try:
+            with metrics_csv.open("r", encoding="utf-8", newline="") as f:
+                rows = list(csv.DictReader(f))
+        except Exception as e:
+            return _fail(f"Failed to parse metrics.csv: {e}")
+        if len(rows) != 1 or str(rows[0].get("frame")) != "0":
+            return _fail(f"Unexpected metrics.csv rows: {rows}")
 
     # 5) STL end-face sanity check (circle_r4 has ~15mm base vs ~8mm tip)
     stl_path = repo_root / "xengym" / "assets" / "obj" / "circle_r4.STL"
