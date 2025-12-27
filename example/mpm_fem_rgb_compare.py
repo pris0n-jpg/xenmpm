@@ -491,6 +491,100 @@ def _compute_rgb_diff_metrics(a_rgb: np.ndarray, b_rgb: np.ndarray) -> Dict[str,
     }
 
 
+def _write_preflight_run_manifest(
+    save_dir: Path,
+    record_interval: int,
+    total_frames: int,
+    run_context: Dict[str, object],
+    *,
+    reason: Optional[str] = None,
+) -> None:
+    """
+    Write a minimal run_manifest.json before entering the heavy render/sim path.
+
+    This keeps outputs auditable even when optional dependencies (ezgl/taichi)
+    are missing in the current environment.
+    """
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    press_steps = int(SCENE_PARAMS["press_steps"])
+    slide_steps = int(SCENE_PARAMS["slide_steps"])
+    hold_steps = int(SCENE_PARAMS["hold_steps"])
+    total_steps = press_steps + slide_steps + hold_steps
+
+    def _phase_for_step(step: int) -> str:
+        if step < press_steps:
+            return "press"
+        if step < press_steps + slide_steps:
+            return "slide"
+        return "hold"
+
+    frame_to_step = [int(i * record_interval) for i in range(int(total_frames))]
+    frame_to_phase = [_phase_for_step(step) for step in frame_to_step]
+    phase_ranges: Dict[str, Dict[str, int]] = {}
+    for i, phase in enumerate(frame_to_phase):
+        if phase not in phase_ranges:
+            phase_ranges[phase] = {"start_frame": i, "end_frame": i}
+        else:
+            phase_ranges[phase]["end_frame"] = i
+
+    manifest: Dict[str, object] = {
+        "created_at": datetime.datetime.now().astimezone().isoformat(),
+        "argv": list(sys.argv),
+        "run_context": dict(run_context),
+        "scene_params": dict(SCENE_PARAMS),
+        "deps": {
+            "has_taichi": bool(HAS_TAICHI),
+            "has_ezgl": bool(HAS_EZGL),
+            "has_cv2": bool(HAS_CV2),
+        },
+        "execution": {
+            "stage": "preflight",
+            "note": "Written before running; may be overwritten by the runtime manifest.",
+            "reason": str(reason) if reason else None,
+        },
+        "trajectory": {
+            "press_steps": press_steps,
+            "slide_steps": slide_steps,
+            "hold_steps": hold_steps,
+            "total_steps": total_steps,
+            "record_interval": int(record_interval),
+            "total_frames": int(total_frames),
+            "phase_ranges_frames": phase_ranges,
+            "frame_to_step": frame_to_step,
+            "frame_to_phase": frame_to_phase,
+            "frame_controls": None,
+        },
+        "outputs": {
+            "frames_glob": {
+                "fem": "fem_*.png",
+                "mpm": "mpm_*.png",
+            },
+            "run_manifest": "run_manifest.json",
+            "metrics": {
+                "csv": "metrics.csv",
+                "json": "metrics.json",
+            },
+            "intermediate": {
+                "dir": "intermediate",
+                "frames_glob": "intermediate/frame_*.npz",
+            },
+        },
+    }
+
+    manifest_path = save_dir / "run_manifest.json"
+    try:
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"Warning: failed to write preflight run manifest: {e}")
+
+
 # ==============================================================================
 # FEM RGB Renderer (Reuses VecTouchSim)
 # ==============================================================================
@@ -2374,33 +2468,7 @@ def main():
             print(f"Intermediate: enabled (every={int(args.export_intermediate_every)}) -> intermediate/frame_XXXX.npz")
     print()
 
-    # Check dependencies
-    if not HAS_EZGL:
-        print("ERROR: ezgl not available, cannot run visualization")
-        return 1
-
-    if not HAS_TAICHI:
-        print("WARNING: Taichi not available, MPM will be disabled")
-
-    # Run comparison
-    engine = RGBComparisonEngine(
-        fem_file=args.fem_file,
-        object_file=args.object_file,
-        mode=args.mode,
-        visible=True,
-        save_dir=args.save_dir,
-        fem_indenter_face=args.fem_indenter_face,
-        fem_indenter_geom=fem_indenter_geom,
-    )
-    engine.mpm_marker_mode = args.mpm_marker
-    engine.mpm_depth_tint = (str(args.mpm_depth_tint).lower().strip() != "off")
-    engine.mpm_show_indenter = args.mpm_show_indenter
-    engine.mpm_debug_overlay = args.mpm_debug_overlay
-    engine.export_intermediate = bool(args.export_intermediate)
-    engine.export_intermediate_every = int(args.export_intermediate_every)
-    if square_d_mm is not None:
-        engine.indenter_square_size_mm = float(square_d_mm)
-    engine.run_context = {
+    run_context = {
         "args": vars(args),
         "resolved": {
             "square_indenter_size_mm": float(square_d_mm) if square_d_mm is not None else None,
@@ -2429,6 +2497,48 @@ def main():
             },
         },
     }
+
+    if args.save_dir:
+        preflight_reason = None
+        if not HAS_EZGL:
+            preflight_reason = "ezgl not available"
+        elif not HAS_TAICHI:
+            preflight_reason = "taichi not available (mpm disabled)"
+        _write_preflight_run_manifest(
+            Path(args.save_dir),
+            record_interval=int(args.record_interval),
+            total_frames=int(expected_frames),
+            run_context=run_context,
+            reason=preflight_reason,
+        )
+
+    # Check dependencies
+    if not HAS_EZGL:
+        print("ERROR: ezgl not available, cannot run visualization")
+        return 1
+
+    if not HAS_TAICHI:
+        print("WARNING: Taichi not available, MPM will be disabled")
+
+    # Run comparison
+    engine = RGBComparisonEngine(
+        fem_file=args.fem_file,
+        object_file=args.object_file,
+        mode=args.mode,
+        visible=True,
+        save_dir=args.save_dir,
+        fem_indenter_face=args.fem_indenter_face,
+        fem_indenter_geom=fem_indenter_geom,
+    )
+    engine.mpm_marker_mode = args.mpm_marker
+    engine.mpm_depth_tint = (str(args.mpm_depth_tint).lower().strip() != "off")
+    engine.mpm_show_indenter = args.mpm_show_indenter
+    engine.mpm_debug_overlay = args.mpm_debug_overlay
+    engine.export_intermediate = bool(args.export_intermediate)
+    engine.export_intermediate_every = int(args.export_intermediate_every)
+    if square_d_mm is not None:
+        engine.indenter_square_size_mm = float(square_d_mm)
+    engine.run_context = run_context
     engine.run_comparison(fps=args.fps, record_interval=int(args.record_interval))
 
     return 0

@@ -8,10 +8,12 @@ Run:
 
 from __future__ import annotations
 
+import json
 import py_compile
 import runpy
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -102,9 +104,46 @@ def main() -> int:
         text=True,
     )
     help_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    for flag in ["--fric", "--mpm-depth-tint", "--export-intermediate"]:
+    for flag in ["--fric", "--mpm-depth-tint", "--export-intermediate"]:   
         if flag not in help_text:
-            return _fail(f"Missing CLI flag in --help output: {flag}")
+            return _fail(f"Missing CLI flag in --help output: {flag}")     
+
+    # 7) Preflight run manifest should be written even without ezgl/taichi
+    #    (keeps outputs auditable in dependency-light environments).
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--mode",
+                "raw",
+                "--record-interval",
+                "5",
+                "--save-dir",
+                str(tmp_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        # In dependency-light envs this typically returns non-zero; that's OK.
+        _ = proc.returncode
+        manifest_path = tmp_dir / "run_manifest.json"
+        if not manifest_path.exists():
+            return _fail("Missing run_manifest.json in preflight save-dir run")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return _fail(f"Failed to parse run_manifest.json: {e}")
+        for key in ["trajectory", "scene_params", "deps", "run_context"]:
+            if key not in manifest:
+                return _fail(f"run_manifest.json missing key: {key}")
+        traj = manifest.get("trajectory") or {}
+        total_frames = int(traj.get("total_frames") or 0)
+        if total_frames <= 0:
+            return _fail(f"Unexpected total_frames in run_manifest.json: {traj.get('total_frames')}")
+        if len(traj.get("frame_to_phase") or []) != total_frames:
+            return _fail("run_manifest.json frame_to_phase length mismatch total_frames")
 
     print("OK: quick_test", flush=True)
     return 0
@@ -112,4 +151,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
