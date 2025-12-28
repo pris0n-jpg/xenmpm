@@ -105,12 +105,19 @@ class MPMSolver:
             self.obstacle_centers = ti.Vector.field(3, dtype=ti.f32, shape=self.n_obstacles)
             self.obstacle_normals = ti.Vector.field(3, dtype=ti.f32, shape=self.n_obstacles)
             self.obstacle_half_extents = ti.Vector.field(3, dtype=ti.f32, shape=self.n_obstacles)
-            type_map = {'plane': 0, 'sphere': 1, 'box': 2}
+            type_map = {'plane': 0, 'sphere': 1, 'box': 2, 'cylinder': 3}
             for i, obs in enumerate(obstacles):
                 self.obstacle_types[i] = type_map.get(obs.sdf_type, 0)
                 self.obstacle_centers[i] = ti.Vector(list(obs.center))
                 self.obstacle_normals[i] = ti.Vector(list(obs.normal))
                 self.obstacle_half_extents[i] = ti.Vector(list(obs.half_extents))
+
+        # Obstacle kinematics (for moving obstacles / friction in relative frame)
+        self.obstacle_centers_prev = ti.Vector.field(3, dtype=ti.f32, shape=self.n_obstacles)
+        self.obstacle_velocities = ti.Vector.field(3, dtype=ti.f32, shape=self.n_obstacles)
+        for i in range(self.n_obstacles):
+            self.obstacle_centers_prev[i] = self.obstacle_centers[i]
+            self.obstacle_velocities[i] = ti.Vector([0.0, 0.0, 0.0])
 
         # Time stepping
         self.dt = config.time.dt
@@ -232,7 +239,7 @@ class MPMSolver:
                     if I[d] < 3 or I[d] >= self.fields.grid_size[d] - 3:
                         self.fields.grid_v[I][d] = 0.0
 
-                # Contact with SDF obstacles (configurable: plane/sphere/box)
+                # Contact with SDF obstacles (configurable: plane/sphere/box/cylinder)
                 if ti.static(self.enable_contact):
                     grid_x = ti.cast(I, ti.f32) * self.dx
                     any_contact = 0
@@ -240,9 +247,10 @@ class MPMSolver:
                     # Iterate over all obstacles
                     for obs_idx in range(self.n_obstacles):
                         obs_type = self.obstacle_types[obs_idx]
-                        obs_center = self.obstacle_centers[obs_idx]
-                        obs_normal = self.obstacle_normals[obs_idx]
-                        obs_half_ext = self.obstacle_half_extents[obs_idx]
+                        obs_center = self.obstacle_centers[obs_idx]       
+                        obs_normal = self.obstacle_normals[obs_idx]       
+                        obs_half_ext = self.obstacle_half_extents[obs_idx] 
+                        obs_vel = self.obstacle_velocities[obs_idx]
 
                         # Evaluate SDF for this obstacle
                         phi = evaluate_sdf(grid_x, obs_type, obs_center, obs_normal, obs_half_ext)
@@ -250,7 +258,7 @@ class MPMSolver:
                         if phi < 0.0:
                             # In contact with this obstacle
                             normal = compute_sdf_normal(grid_x, obs_type, obs_center, obs_normal, obs_half_ext)
-                            v_rel = self.fields.grid_v[I]
+                            v_rel = self.fields.grid_v[I] - obs_vel
 
                             # Compute contact force with friction
                             f_contact, u_t_new, is_contact = compute_contact_force(
@@ -452,7 +460,16 @@ class MPMSolver:
             self.fields.grid_nocontact_age[I] = age_new
 
             if should_clear == 1:
-                self.fields.grid_ut[I] = ti.Vector([0.0, 0.0, 0.0])
+                self.fields.grid_ut[I] = ti.Vector([0.0, 0.0, 0.0])       
+
+    @ti.kernel
+    def update_obstacle_velocities(self):
+        """Update obstacle velocities from center delta (for moving obstacle friction)."""
+        for i in range(self.n_obstacles):
+            cur = self.obstacle_centers[i]
+            prev = self.obstacle_centers_prev[i]
+            self.obstacle_velocities[i] = (cur - prev) / self.dt
+            self.obstacle_centers_prev[i] = cur
 
     def step(self) -> None:
         """Execute one simulation step"""
@@ -460,6 +477,7 @@ class MPMSolver:
         self.fields.clear_particle_energy_increments()
         self.fields.clear_global_energy_step()
 
+        self.update_obstacle_velocities()
         self.p2g()
         self.grid_op()
         self.g2p()

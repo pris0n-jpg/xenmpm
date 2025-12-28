@@ -64,13 +64,15 @@ class SDFConfig:
     - 'plane': Infinite plane defined by point and normal
     - 'sphere': Sphere defined by center and radius
     - 'box': Axis-aligned box defined by center and half_extents
+    - 'cylinder': Capped cylinder aligned with Z axis, defined by center, radius and half_height
 
     Parameters (as tuples):
     - plane: point=(x, y, z), normal=(nx, ny, nz)
     - sphere: center=(x, y, z), radius=r (stored as half_extents=(r, 0, 0))
     - box: center=(x, y, z), half_extents=(hx, hy, hz)
+    - cylinder: center=(x, y, z), radius=r, half_height=h (stored as half_extents=(r, r, h))
     """
-    sdf_type: str = 'plane'  # 'plane', 'sphere', 'box'
+    sdf_type: str = 'plane'  # 'plane', 'sphere', 'box', 'cylinder'
     center: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # Center/point on plane
     normal: Tuple[float, float, float] = (0.0, 0.0, 1.0)  # Normal for plane (unit vector)
     half_extents: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # Half extents for box, or (radius, 0, 0) for sphere

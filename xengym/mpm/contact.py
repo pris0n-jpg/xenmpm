@@ -55,6 +55,36 @@ def sdf_box(x: ti.template(), center: ti.template(), half_extents: ti.template()
 
 
 @ti.func
+def sdf_capped_cylinder(
+    x: ti.template(),
+    center: ti.template(),
+    radius: ti.f32,
+    half_height: ti.f32,
+) -> ti.f32:
+    """
+    Signed distance function for a capped cylinder aligned with the Z axis.
+
+    Args:
+        x: Query point
+        center: Cylinder center
+        radius: Cylinder radius
+        half_height: Half height along Z (cap-to-cap height = 2 * half_height)
+
+    Returns:
+        Signed distance (negative inside, positive outside)
+    """
+    p = x - center
+    d_xy = ti.sqrt(p[0] * p[0] + p[1] * p[1]) - radius
+    d_z = ti.abs(p[2]) - half_height
+
+    ax = ti.max(d_xy, 0.0)
+    az = ti.max(d_z, 0.0)
+    outside_dist = ti.sqrt(ax * ax + az * az)
+    inside_dist = ti.min(ti.max(d_xy, d_z), 0.0)
+    return inside_dist + outside_dist
+
+
+@ti.func
 def evaluate_sdf(
     x: ti.template(),
     sdf_type: ti.i32,
@@ -67,10 +97,11 @@ def evaluate_sdf(
 
     Args:
         x: Query point
-        sdf_type: 0=plane, 1=sphere, 2=box
+        sdf_type: 0=plane, 1=sphere, 2=box, 3=cylinder
         center: Center/point on plane
-        normal: Normal for plane (ignored for sphere/box)
-        half_extents: Half extents for box, or (radius, 0, 0) for sphere
+        normal: Normal for plane (ignored for sphere/box/cylinder)
+        half_extents: Half extents for box; (radius, 0, 0) for sphere;
+            (radius, radius, half_height) for cylinder
 
     Returns:
         Signed distance (negative = penetration)
@@ -80,6 +111,8 @@ def evaluate_sdf(
         phi = sdf_plane(x, center, normal)
     elif sdf_type == 1:  # Sphere
         phi = sdf_sphere(x, center, half_extents[0])
+    elif sdf_type == 3:  # Cylinder (capped, Z-axis)
+        phi = sdf_capped_cylinder(x, center, half_extents[0], half_extents[2])
     else:  # Box (sdf_type == 2)
         phi = sdf_box(x, center, half_extents)
     return phi
@@ -98,10 +131,11 @@ def compute_sdf_normal(
 
     Args:
         x: Query point
-        sdf_type: 0=plane, 1=sphere, 2=box
+        sdf_type: 0=plane, 1=sphere, 2=box, 3=cylinder
         center: Center/point on plane
         normal_plane: Normal for plane
-        half_extents: Half extents for box, or (radius, 0, 0) for sphere
+        half_extents: Half extents for box; (radius, 0, 0) for sphere;
+            (radius, radius, half_height) for cylinder
 
     Returns:
         Outward normal vector (unit)
@@ -117,6 +151,50 @@ def compute_sdf_normal(
             n = diff / dist
         else:
             n = ti.Vector([0.0, 0.0, 1.0])
+    elif sdf_type == 3:  # Cylinder (capped, Z-axis)
+        p = x - center
+        radius = half_extents[0]
+        half_height = half_extents[2]
+
+        d_xy = ti.sqrt(p[0] * p[0] + p[1] * p[1])
+        qx = d_xy - radius
+        qz = ti.abs(p[2]) - half_height
+
+        ax = ti.max(qx, 0.0)
+        az = ti.max(qz, 0.0)
+        outside = (qx > 0.0) | (qz > 0.0)
+
+        if outside:
+            l = ti.sqrt(ax * ax + az * az)
+            if l > 1e-8:
+                side_w = ax / l
+                cap_w = az / l
+
+                nx = 0.0
+                ny = 0.0
+                nz = 0.0
+                if d_xy > 1e-8:
+                    nx = (p[0] / d_xy) * side_w
+                    ny = (p[1] / d_xy) * side_w
+                else:
+                    nx = side_w
+                    ny = 0.0
+
+                nz = cap_w * ti.select(p[2] >= 0.0, 1.0, -1.0)
+                n = ti.Vector([nx, ny, nz])
+            else:
+                if d_xy > 1e-8:
+                    n = ti.Vector([p[0] / d_xy, p[1] / d_xy, 0.0])
+                else:
+                    n = ti.Vector([0.0, 0.0, 1.0])
+        else:
+            if qx > qz:
+                if d_xy > 1e-8:
+                    n = ti.Vector([p[0] / d_xy, p[1] / d_xy, 0.0])
+                else:
+                    n = ti.Vector([1.0, 0.0, 0.0])
+            else:
+                n = ti.Vector([0.0, 0.0, ti.select(p[2] >= 0.0, 1.0, -1.0)])
     else:  # Box (sdf_type == 2)
         # For box, compute normal from closest face
         q = x - center

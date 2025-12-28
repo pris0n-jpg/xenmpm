@@ -144,44 +144,71 @@ SCENE_PARAMS = {
     'height_grid_shape': (140, 80),     # (n_row, n_col)
 
     # Height-field postprocess (MPM -> render)
-    'mpm_height_fill_holes': False,     # fill empty cells via diffusion (off by default for compatibility)
+    'mpm_height_fill_holes': True,      # fill empty cells via diffusion (recommended to avoid hard-edge artifacts)
     'mpm_height_fill_holes_iters': 10,  # iterations for hole filling
     'mpm_height_smooth': True,          # apply box smoothing before rendering
     'mpm_height_smooth_iters': 2,       # matches previous hardcoded behavior
+    'mpm_height_reference_edge': True,  # use edge-region baseline alignment (preserve slide motion)
+    # IMPORTANT: MPM 接触采用 penalty 形式时，压头可能“穿透”粒子表面并导致高度场过深，
+    # 从而出现非物理的“整块发黑/暗盘”。该开关会把 height_field 限制在“不低于压头表面”。
+    'mpm_height_clamp_indenter': True,
 
     # Trajectory parameters
-    'press_depth_mm': 2.0,              # target indentation depth (increased for better friction coupling)
+    # NOTE: 默认压深建议保持在 FEM 数据覆盖范围内（通常 <= 1mm），否则 MPM 侧容易出现“广域下陷”
+    # 进而放大渲染伪影（暗块/halo），导致 MPM vs FEM 观感不可直接对比。
+    'press_depth_mm': 1.0,              # target indentation depth (mm)
     'slide_distance_mm': 3.0,           # tangential travel (x direction)
-    'press_steps': 150,                 # steps to reach press depth (increased for deeper press)
+    'press_steps': 150,                 # steps to reach press depth
     'slide_steps': 240,                 # steps for sliding phase
     'hold_steps': 40,                   # steps to hold at end
 
     # MPM simulation parameters
     'mpm_dt': 2e-5,                     # Reduced for stability with higher stiffness
     'mpm_grid_dx_mm': 0.4,              # grid spacing in mm
-    'mpm_particles_per_cell': 2,        # particles per cell per dimension
+    'mpm_particles_per_cell': 2,        # particles per cell per dimension      
+
+    # MPM grid padding (cells) to keep particles away from sticky boundaries.
+    # MPMSolver.grid_op clamps grid velocities when I[d] < 3 or I[d] >= grid_size[d]-3.
+    # Using >=6 padding cells provides a safety margin for contact/friction.
+    'mpm_grid_padding_cells_xy': 6,
+    'mpm_grid_padding_cells_z_bottom': 6,
+    'mpm_grid_padding_cells_z_top': 20,
 
     # Material (soft gel)
     'density': 1000.0,                  # kg/m³
     'ogden_mu': [2500.0],               # Pa
     'ogden_alpha': [2.0],
-    'ogden_kappa': 25000.0,             # Pa
+    # NOTE: kappa 控制体积压缩性（kappa >> mu 时近似不可压缩）。
+    # 早期的 2.5e4 Pa 会导致明显“广域下陷带”，MPM vs FEM 无法直接对比。
+    # 这里默认对齐到 xengym MPM demo 常用量级（~3e5 Pa），并保留 CLI 覆盖入口。
+    'ogden_kappa': 300000.0,            # Pa
 
     # Indenter (sphere)
     'indenter_radius_mm': 4.0,
     'indenter_start_gap_mm': 0.5,       # initial clearance above gel
-    'indenter_type': 'box',             # 'sphere' or 'box' (flat bottom)
+    # Indenter (sphere/cylinder/box)
+    # - cylinder: flat round pad, matches circle_r4.STL (tip face) better than box
+    'indenter_type': 'cylinder',        # 'sphere' | 'cylinder' | 'box'
+    'indenter_cylinder_half_height_mm': None,  # Optional half height for cylinder; default uses radius
     'indenter_half_extents_mm': None,   # Optional (x,y,z) for box mode; overrides indenter_radius_mm
 
     # Contact / friction (explicit defaults for auditability)
     'fem_fric_coef': 0.4,               # FEM fric_coef (single coefficient)
     'mpm_mu_s': 2.0,                    # MPM static friction (mu_s)
-    'mpm_mu_k': 1.5,                    # MPM kinetic friction (mu_k)
+    'mpm_mu_k': 1.5,                    # MPM kinetic friction (mu_k)     
+    'mpm_contact_stiffness_normal': 8e2,
+    'mpm_contact_stiffness_tangent': 4e2,
+
+    # Optional Kelvin-Voigt bulk viscosity (damping) for MPM
+    'mpm_enable_bulk_viscosity': False,
+    'mpm_bulk_viscosity': 0.0,          # Pa·s
 
     # Depth camera settings (for FEM path)
     'depth_img_size': (100, 175),       # matches demo_simple_sensor
-    'cam_view_width_m': 0.0194,         # 19.4 mm
-    'cam_view_height_m': 0.0308,        # 30.8 mm
+    # IMPORTANT: For FEM depth->gel mapping, the depth camera ortho view should match gel_size_mm.
+    # Keep these consistent to avoid implicit scaling mismatch between FEM and MPM.
+    'cam_view_width_m': 0.0173,         # 17.3 mm (match gel_size_mm[0])
+    'cam_view_height_m': 0.02915,       # 29.15 mm (match gel_size_mm[1])
 
     # Debug settings
     'debug_verbose': False,             # Enable verbose per-frame logging
@@ -383,6 +410,8 @@ def _fill_height_holes(height_mm: np.ndarray, valid_mask: np.ndarray, max_iterat
     if valid_mask.shape != height_mm.shape:
         raise ValueError("valid_mask shape must match height_mm")
 
+    # NOTE: height_mm may contain NaN for missing cells; keep NaN but ensure
+    # they do not pollute neighbor aggregation (use nan_to_num when padding).
     result = height_mm.astype(np.float32, copy=True)
     filled = valid_mask.copy()
 
@@ -401,7 +430,12 @@ def _fill_height_holes(height_mm: np.ndarray, valid_mask: np.ndarray, max_iterat
         if not can_fill.any():
             break
 
-        padded_h = np.pad(result, ((1, 1), (1, 1)), mode="constant", constant_values=0)
+        padded_h = np.pad(
+            np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0),
+            ((1, 1), (1, 1)),
+            mode="constant",
+            constant_values=0,
+        )
         padded_mask = np.pad(filled.astype(np.float32), ((1, 1), (1, 1)), mode="constant", constant_values=0)
 
         neighbor_sum = np.zeros_like(result)
@@ -659,7 +693,7 @@ class FEMRGBRenderer:
         fem_file: str,
         object_file: Optional[str] = None,
         visible: bool = False,
-        indenter_face: str = "base",
+        indenter_face: str = "tip",
         indenter_geom: str = "stl",
     ):
         if not HAS_EZGL:
@@ -746,7 +780,7 @@ class DepthRenderScene(Scene):
         self,
         object_file: Optional[str] = None,
         visible: bool = True,
-        indenter_face: str = "base",
+        indenter_face: str = "tip",
         indenter_geom: str = "stl",
     ):
         # Note: visible=True is required for proper OpenGL context initialization
@@ -920,6 +954,7 @@ class MPMHeightFieldRenderer:
         self._y_min_mm = 0.0
         self._surface_indices: Optional[np.ndarray] = None
         self._initial_positions_m: Optional[np.ndarray] = None
+        self._last_height_reference_z_mm = 0.0
 
     def _create_render_scene(self) -> 'MPMSensorScene':
         """Create rendering scene matching SensorScene style"""
@@ -954,14 +989,17 @@ class MPMHeightFieldRenderer:
     def extract_height_field(
         self,
         positions_m: np.ndarray,
-        initial_top_z_m: float
+        initial_top_z_m: float,
+        indenter_center_m: Optional[Tuple[float, float, float]] = None,
     ) -> np.ndarray:
         """
         Extract top-surface height field from MPM particles
 
         Args:
             positions_m: Particle positions (N, 3) in meters
-            initial_top_z_m: Initial top surface z coordinate in meters
+            initial_top_z_m: Initial top surface z coordinate in meters  
+            indenter_center_m: Optional indenter center (x,y,z) in meters, used to clamp
+                height_field not below indenter surface (avoid penalty penetration artifacts).
 
         Returns:
             height_field_mm: (n_row, n_col) array, negative = indentation
@@ -972,11 +1010,12 @@ class MPMHeightFieldRenderer:
         if not self._is_configured:
             self.configure_from_initial_positions(positions_m, initial_top_z_m)
 
+        # NOTE: 这里不能只取“初始顶面一层粒子”。在平底压头（cylinder/box）接触中，
+        # 初始顶面粒子可能会被挤压下沉并被更深层粒子“顶替”成为新表面；
+        # 若仅追踪初始顶面索引，会把“已下沉的旧表面”误当成当前表面，导致高度场过深，
+        # 进而在渲染中出现非物理的“整块变暗/发脏”。
         pos_mm = positions_m * 1000.0
         z_top_init_mm = initial_top_z_m * 1000.0
-
-        if self._surface_indices is not None and len(self._surface_indices) > 0:
-            pos_mm = pos_mm[self._surface_indices]
 
         # Map to sensor grid using cached reference frame:
         # x ∈ [-gel_w/2, gel_w/2], y ∈ [0, gel_h]
@@ -988,46 +1027,121 @@ class MPMHeightFieldRenderer:
         cell_w = gel_w_mm / n_col
         cell_h = gel_h_mm / n_row
 
-        # Initialize height field with -inf so we can take max z_disp per cell (top surface)
+        # Build height field using a small neighborhood splat to reduce holes.
+        # The render grid resolution is close to particle spacing, so strict per-cell binning
+        # creates pepper noise (empty cells) which becomes hard edges after shading.
+        x_mm = pos_sensor[:, 0].astype(np.float32, copy=False)
+        y_mm = pos_sensor[:, 1].astype(np.float32, copy=False)
+        z_mm = pos_sensor[:, 2].astype(np.float32, copy=False)
+        z_disp = (z_mm - np.float32(z_top_init_mm)).astype(np.float32, copy=False)  # <= 0
+
+        col_f = (x_mm + np.float32(gel_w_mm / 2.0)) / np.float32(cell_w) - np.float32(0.5)
+        row_f = y_mm / np.float32(cell_h) - np.float32(0.5)
+        col0 = np.floor(col_f).astype(np.int32)
+        row0 = np.floor(row_f).astype(np.int32)
+
+        # Initialize with -inf so we can take max z_disp per cell (top surface).
         height_field = np.full((n_row, n_col), -np.inf, dtype=np.float32)
+        for di in (0, 1):
+            rr = row0 + di
+            for dj in (0, 1):
+                cc = col0 + dj
+                m = (rr >= 0) & (rr < n_row) & (cc >= 0) & (cc < n_col)
+                if m.any():
+                    np.maximum.at(height_field, (rr[m], cc[m]), z_disp[m])
 
-        for particle_idx in range(len(pos_sensor)):
-            x_mm, y_mm, z_mm = pos_sensor[particle_idx]
-            col = int((x_mm + gel_w_mm / 2.0) / cell_w)
-            row = int(y_mm / cell_h)
-            if 0 <= row < n_row and 0 <= col < n_col:
-                z_disp = float(z_mm - z_top_init_mm)  # <= 0
-                if z_disp > height_field[row, col]:
-                    height_field[row, col] = z_disp
+        height_field[~np.isfinite(height_field)] = np.nan
+        valid_mask = np.isfinite(height_field)
 
-        empty_mask = ~np.isfinite(height_field)
-        valid_mask = ~empty_mask
-        height_field[empty_mask] = 0.0
+        reference_z = 0.0
+        if bool(SCENE_PARAMS.get("mpm_height_reference_edge", True)):    
+            # CRITICAL: Use EDGE regions as fixed spatial reference for better contrast.
+            # This preserves slide motion (unlike global percentile which cancels it).
+            # Use original valid cells for baseline to avoid bias from hole filling.
+            edge_margin = max(3, n_row // 20)  # ~5% margin or at least 3 rows/cols
+            edge_mask = np.zeros_like(valid_mask, dtype=bool)
+            edge_mask[:edge_margin, :] = True
+            edge_mask[-edge_margin:, :] = True
+            if edge_margin * 2 < n_row and edge_margin * 2 < n_col:
+                edge_mask[edge_margin:-edge_margin, :edge_margin] = True
+                edge_mask[edge_margin:-edge_margin, -edge_margin:] = True
 
+            edge_values = height_field[edge_mask & valid_mask]
+            edge_valid = edge_values[np.isfinite(edge_values) & (edge_values > -10)]  # filter outliers
+            if edge_valid.size > 0:
+                reference_z = float(np.median(edge_valid))  # Median is robust to outliers
+                height_field = height_field - reference_z  # Now center region depression is negative
+
+        # Cache the per-run reference used by extract_surface_fields() so UV selection is consistent.
+        self._last_height_reference_z_mm = float(reference_z)
+
+        # IMPORTANT: Clamp to indenter surface to suppress over-penetration artifacts.
+        if (
+            indenter_center_m is not None
+            and bool(SCENE_PARAMS.get("mpm_height_clamp_indenter", True))
+        ):
+            try:
+                cx_mm = float(indenter_center_m[0]) * 1000.0 - float(self._x_center_mm)
+                cy_mm = float(indenter_center_m[1]) * 1000.0 - float(self._y_min_mm)
+                cz_mm = float(indenter_center_m[2]) * 1000.0
+
+                x_centers = (np.arange(n_col, dtype=np.float32) + 0.5) * np.float32(cell_w) - np.float32(gel_w_mm / 2.0)
+                y_centers = (np.arange(n_row, dtype=np.float32) + 0.5) * np.float32(cell_h)
+                xx, yy = np.meshgrid(x_centers, y_centers)
+
+                clamp_field = np.full((n_row, n_col), np.nan, dtype=np.float32)
+                indenter_type = str(SCENE_PARAMS.get("indenter_type", "box")).lower().strip()
+
+                if indenter_type == "sphere":
+                    r_mm = float(SCENE_PARAMS.get("indenter_radius_mm", 4.0))
+                    rr = np.sqrt((xx - np.float32(cx_mm)) ** 2 + (yy - np.float32(cy_mm)) ** 2)
+                    inside = rr <= np.float32(r_mm)
+                    # Sphere lower hemisphere: z = cz - sqrt(R^2 - r^2)
+                    dz = np.sqrt(np.maximum(np.float32(r_mm) ** 2 - rr ** 2, 0.0))
+                    z_surface_mm = np.float32(cz_mm) - dz
+                    surface_disp = (z_surface_mm - np.float32(z_top_init_mm)) - np.float32(reference_z)
+                    clamp_field[inside] = surface_disp[inside].astype(np.float32, copy=False)
+                    clamp_field[~(clamp_field < 0.0)] = np.nan
+                elif indenter_type == "cylinder":
+                    r_mm = float(SCENE_PARAMS.get("indenter_radius_mm", 4.0))
+                    half_h_mm = SCENE_PARAMS.get("indenter_cylinder_half_height_mm", None)
+                    half_h_mm = float(r_mm if half_h_mm is None else float(half_h_mm))
+                    inside = ((xx - np.float32(cx_mm)) ** 2 + (yy - np.float32(cy_mm)) ** 2) <= np.float32(r_mm) ** 2
+                    surface_disp = (np.float32(cz_mm) - np.float32(half_h_mm) - np.float32(z_top_init_mm)) - np.float32(reference_z)
+                    if float(surface_disp) < 0.0:
+                        clamp_field[inside] = np.float32(surface_disp)
+                else:
+                    half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
+                    if half_extents_mm is not None and len(half_extents_mm) == 3:
+                        hx_mm, hy_mm, hz_mm = [float(v) for v in half_extents_mm]
+                    else:
+                        r_mm = float(SCENE_PARAMS.get("indenter_radius_mm", 4.0))
+                        hx_mm = hy_mm = hz_mm = float(r_mm)
+                    inside = (np.abs(xx - np.float32(cx_mm)) <= np.float32(hx_mm)) & (np.abs(yy - np.float32(cy_mm)) <= np.float32(hy_mm))
+                    surface_disp = (np.float32(cz_mm) - np.float32(hz_mm) - np.float32(z_top_init_mm)) - np.float32(reference_z)
+                    if float(surface_disp) < 0.0:
+                        clamp_field[inside] = np.float32(surface_disp)
+
+                # Use fmax to keep NaNs outside indenter footprint.
+                height_field = np.fmax(height_field, clamp_field)
+                valid_mask = np.isfinite(height_field)
+            except Exception as e:
+                if SCENE_PARAMS.get("debug_verbose", False):
+                    print(f"[MPM HEIGHT] clamp_to_indenter failed: {e}")
+
+        # Fill holes after baseline alignment to avoid converting holes into small positive bumps
+        # (which get clamped to 0 and create hard edges / rainbow halos after shading).
         if bool(SCENE_PARAMS.get("mpm_height_fill_holes", False)):
             iters = int(SCENE_PARAMS.get("mpm_height_fill_holes_iters", 10))
             if iters > 0:
                 try:
                     height_field = _fill_height_holes(height_field, valid_mask, max_iterations=iters)
                 except Exception:
-                    pass
-
-        # CRITICAL: Use EDGE regions as fixed spatial reference for better contrast.
-        # This preserves slide motion (unlike global percentile which cancels it).
-        # Use original valid cells for baseline to avoid bias from hole-filling.
-        edge_margin = max(3, n_row // 20)  # ~5% margin or at least 3 rows/cols
-        edge_mask = np.zeros_like(valid_mask, dtype=bool)
-        edge_mask[:edge_margin, :] = True
-        edge_mask[-edge_margin:, :] = True
-        if edge_margin * 2 < n_row and edge_margin * 2 < n_col:
-            edge_mask[edge_margin:-edge_margin, :edge_margin] = True
-            edge_mask[edge_margin:-edge_margin, -edge_margin:] = True
-
-        edge_values = height_field[edge_mask & valid_mask]
-        edge_valid = edge_values[np.isfinite(edge_values) & (edge_values > -10)]  # filter outliers
-        if edge_valid.size > 0:
-            reference_z = float(np.median(edge_valid))  # Median is robust to outliers
-            height_field = height_field - reference_z  # Now center region depression is negative
+                    height_field = np.nan_to_num(height_field, nan=0.0)
+            else:
+                height_field = np.nan_to_num(height_field, nan=0.0)
+        else:
+            height_field = np.nan_to_num(height_field, nan=0.0)
 
         # Debug: check height field statistics
         valid_mask = height_field < -0.05  # Only count significant depressions
@@ -1056,6 +1170,7 @@ class MPMHeightFieldRenderer:
         self,
         positions_m: np.ndarray,
         initial_top_z_m: float,
+        indenter_center_m: Optional[Tuple[float, float, float]] = None,
         smooth_uv: bool = True
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -1065,7 +1180,11 @@ class MPMHeightFieldRenderer:
             height_field_mm: (Ny,Nx), <= 0 表示压入
             uv_disp_mm: (Ny,Nx,2), 单位 mm
         """
-        height_field = self.extract_height_field(positions_m, initial_top_z_m)
+        height_field = self.extract_height_field(
+            positions_m,
+            initial_top_z_m,
+            indenter_center_m=indenter_center_m,
+        )
 
         if not self._is_configured:
             self.configure_from_initial_positions(positions_m, initial_top_z_m)
@@ -1079,10 +1198,8 @@ class MPMHeightFieldRenderer:
         pos_mm_all = positions_m * 1000.0
         init_mm_all = self._initial_positions_m * 1000.0
 
-        if self._surface_indices is not None and len(self._surface_indices) > 0:
-            idx = self._surface_indices
-            pos_mm_all = pos_mm_all[idx]
-            init_mm_all = init_mm_all[idx]
+        # NOTE: 同 extract_height_field()，这里也必须使用“当前顶面”而不是“初始顶面一层”。
+        # 否则在平底压头接触/滑移时，UV 会接近 0，marker 看起来像贴在屏幕上不动。
 
         pos_sensor = pos_mm_all.copy()
         init_sensor = init_mm_all.copy()
@@ -1097,15 +1214,50 @@ class MPMHeightFieldRenderer:
         uv_sum = np.zeros((n_row, n_col, 2), dtype=np.float32)
         uv_cnt = np.zeros((n_row, n_col), dtype=np.int32)
 
-        for particle_idx in range(len(pos_sensor)):
-            x_mm, y_mm, _ = pos_sensor[particle_idx]
-            col = int((x_mm + gel_w_mm / 2.0) / cell_w)
-            row = int(y_mm / cell_h)
-            if 0 <= row < n_row and 0 <= col < n_col:
-                disp_xy = pos_sensor[particle_idx, :2] - init_sensor[particle_idx, :2]
-                uv_sum[row, col, 0] += float(disp_xy[0])
-                uv_sum[row, col, 1] += float(disp_xy[1])
-                uv_cnt[row, col] += 1
+        # Vectorized per-cell surface displacement:
+        # - reuse the same 4-neighbor splat as height extraction
+        # - only keep particles near each cell's top surface (within `surface_band_mm`)
+        x_mm = pos_sensor[:, 0].astype(np.float32, copy=False)
+        y_mm = pos_sensor[:, 1].astype(np.float32, copy=False)
+        z_mm = pos_sensor[:, 2].astype(np.float32, copy=False)
+        z_top_init_mm = np.float32(initial_top_z_m * 1000.0)
+        z_disp = (z_mm - z_top_init_mm).astype(np.float32, copy=False)
+        z_disp = z_disp - np.float32(getattr(self, "_last_height_reference_z_mm", 0.0))
+
+        disp_x = (pos_sensor[:, 0] - init_sensor[:, 0]).astype(np.float32, copy=False)
+        disp_y = (pos_sensor[:, 1] - init_sensor[:, 1]).astype(np.float32, copy=False)
+
+        col_f = (x_mm + np.float32(gel_w_mm / 2.0)) / np.float32(cell_w) - np.float32(0.5)
+        row_f = y_mm / np.float32(cell_h) - np.float32(0.5)
+        col0 = np.floor(col_f).astype(np.int32)
+        row0 = np.floor(row_f).astype(np.int32)
+
+        dx_m = float(SCENE_PARAMS['mpm_grid_dx_mm']) * 1e-3
+        particles_per_cell = float(SCENE_PARAMS['mpm_particles_per_cell'])
+        particle_spacing_m = dx_m / max(particles_per_cell, 1.0)
+        surface_band_mm = np.float32(2.0 * particle_spacing_m * 1000.0)
+
+        for di in (0, 1):
+            rr = row0 + di
+            for dj in (0, 1):
+                cc = col0 + dj
+                m = (rr >= 0) & (rr < n_row) & (cc >= 0) & (cc < n_col)
+                if not m.any():
+                    continue
+
+                rr_m = rr[m]
+                cc_m = cc[m]
+                ref = height_field[rr_m, cc_m].astype(np.float32, copy=False)
+                z_m = z_disp[m]
+                top = np.isfinite(ref) & (z_m >= (ref - surface_band_mm))
+                if not top.any():
+                    continue
+
+                rr_t = rr_m[top]
+                cc_t = cc_m[top]
+                np.add.at(uv_sum[..., 0], (rr_t, cc_t), disp_x[m][top])
+                np.add.at(uv_sum[..., 1], (rr_t, cc_t), disp_y[m][top])
+                np.add.at(uv_cnt, (rr_t, cc_t), 1)
 
         uv = np.zeros((n_row, n_col, 2), dtype=np.float32)
         nonzero = uv_cnt > 0
@@ -1563,10 +1715,13 @@ class MPMSimulationAdapter:
         dx = SCENE_PARAMS['mpm_grid_dx_mm'] * 1e-3
 
         # Grid size (with padding)
+        pad_xy = int(SCENE_PARAMS.get("mpm_grid_padding_cells_xy", 6))
+        pad_z_bottom = int(SCENE_PARAMS.get("mpm_grid_padding_cells_z_bottom", 6))
+        pad_z_top = int(SCENE_PARAMS.get("mpm_grid_padding_cells_z_top", 20))
         grid_extent = [
-            int(np.ceil(gel_w_m / dx)) + 8,
-            int(np.ceil(gel_h_m / dx)) + 8,
-            int(np.ceil(gel_t_m * 2 / dx)) + 8,
+            int(np.ceil(gel_w_m / dx)) + pad_xy * 2,
+            int(np.ceil(gel_h_m / dx)) + pad_xy * 2,
+            int(np.ceil(gel_t_m / dx)) + pad_z_bottom + pad_z_top,
         ]
 
         # Create particles
@@ -1578,10 +1733,20 @@ class MPMSimulationAdapter:
         indenter_type = SCENE_PARAMS.get('indenter_type', 'box')
 
         # Determine the effective z half-height for indenter placement
-        # For sphere: use radius; for box: use half_extents[2]
+        # - sphere: use radius
+        # - cylinder: use half_height (defaults to radius)
+        # - box: use half_extents[2]
         if indenter_type == 'sphere':
             indenter_z_half = indenter_r
             half_extents = (indenter_r, 0, 0)  # sphere uses radius in first component
+        elif indenter_type == 'cylinder':
+            half_h_mm = SCENE_PARAMS.get("indenter_cylinder_half_height_mm", None)
+            if half_h_mm is None:
+                half_h = float(indenter_r)
+            else:
+                half_h = float(half_h_mm) * 1e-3
+            indenter_z_half = float(half_h)
+            half_extents = (indenter_r, indenter_r, float(half_h))  # (radius, radius, half_height)
         else:
             # Box (flat bottom): use half_extents for z calculation
             half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
@@ -1610,6 +1775,12 @@ class MPMSimulationAdapter:
                 center=indenter_center,
                 half_extents=half_extents
             ))
+        elif indenter_type == 'cylinder':
+            obstacles.append(SDFConfig(
+                sdf_type="cylinder",
+                center=indenter_center,
+                half_extents=half_extents
+            ))
         else:
             obstacles.append(SDFConfig(
                 sdf_type="box",
@@ -1622,10 +1793,22 @@ class MPMSimulationAdapter:
 
         mpm_mu_s = float(SCENE_PARAMS.get("mpm_mu_s", 2.0))
         mpm_mu_k = float(SCENE_PARAMS.get("mpm_mu_k", 1.5))
+        k_n = float(SCENE_PARAMS.get("mpm_contact_stiffness_normal", 8e2))
+        k_t = float(SCENE_PARAMS.get("mpm_contact_stiffness_tangent", 4e2))
+        print(f"[MPM] Contact: k_n={k_n:.3g}, k_t={k_t:.3g}, mu_s={mpm_mu_s:.3g}, mu_k={mpm_mu_k:.3g}")
+
+        enable_bulk_visc = bool(SCENE_PARAMS.get("mpm_enable_bulk_viscosity", False))
+        eta_bulk = float(SCENE_PARAMS.get("mpm_bulk_viscosity", 0.0))
+        print(
+            f"[MPM] Material: ogden_mu={SCENE_PARAMS.get('ogden_mu')}, "
+            f"ogden_alpha={SCENE_PARAMS.get('ogden_alpha')}, "
+            f"ogden_kappa={SCENE_PARAMS.get('ogden_kappa')}, "
+            f"bulk_viscosity={'on' if enable_bulk_visc else 'off'} (eta={eta_bulk:g})"
+        )
 
         config = MPMConfig(
             grid=GridConfig(grid_size=grid_extent, dx=dx),
-            time=TimeConfig(dt=SCENE_PARAMS['mpm_dt'], num_steps=1),
+            time=TimeConfig(dt=SCENE_PARAMS['mpm_dt'], num_steps=1),      
             material=MaterialConfig(
                 density=SCENE_PARAMS['density'],
                 ogden=OgdenConfig(
@@ -1634,12 +1817,13 @@ class MPMSimulationAdapter:
                     kappa=SCENE_PARAMS['ogden_kappa']
                 ),
                 maxwell_branches=[],
-                enable_bulk_viscosity=False
+                enable_bulk_viscosity=enable_bulk_visc,
+                bulk_viscosity=eta_bulk,
             ),
             contact=ContactConfig(
                 enable_contact=True,
-                contact_stiffness_normal=8e2,  # Balanced for stability and response
-                contact_stiffness_tangent=4e2,  # Good tangential coupling
+                contact_stiffness_normal=k_n,
+                contact_stiffness_tangent=k_t,
                 mu_s=mpm_mu_s,  # static friction
                 mu_k=mpm_mu_k,  # kinetic friction
                 obstacles=obstacles,
@@ -1702,10 +1886,13 @@ class MPMSimulationAdapter:
         positions = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1).astype(np.float32)
 
         # Shift to positive domain with padding
-        # MPM solver has sticky boundary at I[d] < 3, so need padding > 3*dx
-        padding = dx * 6
+        # MPM solver has sticky boundary at I[d] < 3 or I[d] >= grid_size[d]-3.
+        # Keep particles away from boundary nodes to avoid artificial clamping.
+        pad_xy = int(SCENE_PARAMS.get("mpm_grid_padding_cells_xy", 6))
+        pad_z_bottom = int(SCENE_PARAMS.get("mpm_grid_padding_cells_z_bottom", 6))
+        padding_vec = np.array([pad_xy * dx, pad_xy * dx, pad_z_bottom * dx], dtype=np.float32)
         min_pos = positions.min(axis=0)
-        positions += (padding - min_pos)
+        positions += (padding_vec - min_pos)
 
         self._initial_positions = positions.copy()
         self.initial_positions_m = self._initial_positions.copy()
@@ -1838,7 +2025,7 @@ class RGBComparisonEngine:
         mode: str = 'raw',
         visible: bool = True,
         save_dir: Optional[str] = None,
-        fem_indenter_face: str = "base",
+        fem_indenter_face: str = "tip",
         fem_indenter_geom: str = "auto",
     ):
         self.mode = mode
@@ -1878,6 +2065,7 @@ class RGBComparisonEngine:
         # Export / audit outputs (only active when --save-dir is set)
         self.export_intermediate = False
         self.export_intermediate_every = 1
+        self._exported_image_frames = set()
         self._exported_metrics_frames = set()
         self._exported_intermediate_frames = set()
         self._metrics_rows = []
@@ -2102,7 +2290,85 @@ class RGBComparisonEngine:
         except Exception as e:
             print(f"Warning: failed to export intermediate frame {frame}: {e}")
 
-    def run_comparison(self, fps: int = 30, record_interval: int = 5):
+    def _export_frame_artifacts(
+        self,
+        frame_id: int,
+        fem_rgb: Optional[np.ndarray],
+        mpm_rgb: Optional[np.ndarray],
+        mpm_height_field: Optional[np.ndarray],
+        mpm_uv_disp: Optional[np.ndarray],
+    ) -> None:
+        if not self.save_dir:
+            return
+
+        # Metrics (one-shot per frame)
+        if (
+            fem_rgb is not None
+            and mpm_rgb is not None
+            and frame_id not in self._exported_metrics_frames
+        ):
+            self._exported_metrics_frames.add(int(frame_id))
+            try:
+                metrics = _compute_rgb_diff_metrics(fem_rgb, mpm_rgb)
+                phase = None
+                if self._frame_to_phase is not None and frame_id < len(self._frame_to_phase):
+                    phase = self._frame_to_phase[frame_id]
+                self._metrics_rows.append(
+                    {
+                        "frame": int(frame_id),
+                        "phase": phase,
+                        "mode": str(self.mode),
+                        **metrics,
+                    }
+                )
+                self._write_metrics_files()
+            except Exception as e:
+                print(f"Warning: failed to compute metrics for frame {frame_id}: {e}")
+
+        # Intermediate arrays (one-shot per frame, with --export-intermediate-every)
+        if self.export_intermediate and frame_id not in self._exported_intermediate_frames:
+            self._exported_intermediate_frames.add(int(frame_id))
+            every = int(self.export_intermediate_every) if int(self.export_intermediate_every) > 0 else 1
+            if frame_id % every == 0:
+                fem_depth_mm = None
+                fem_marker_disp = None
+                fem_contact_mask_u8 = None
+                if self.fem_renderer is not None:
+                    try:
+                        fem_depth_mm = self.fem_renderer.sensor_sim.get_depth()
+                    except Exception:
+                        pass
+                    try:
+                        fem_marker_disp = self.fem_renderer.sensor_sim.get_marker_displacement()
+                    except Exception:
+                        pass
+                    fem_contact_mask_u8 = self._compute_fem_contact_mask_u8()
+                self._export_intermediate_frame(
+                    frame=frame_id,
+                    mpm_height_field_mm=mpm_height_field,
+                    mpm_uv_disp_mm=mpm_uv_disp,
+                    fem_depth_mm=fem_depth_mm,
+                    fem_marker_disp=fem_marker_disp,
+                    fem_contact_mask_u8=fem_contact_mask_u8,
+                )
+
+        # Frame images (avoid overwriting when UI is looping)
+        if HAS_CV2 and fem_rgb is not None and frame_id not in self._exported_image_frames:
+            self._exported_image_frames.add(int(frame_id))
+            try:
+                cv2.imwrite(
+                    str(self.save_dir / f"fem_{int(frame_id):04d}.png"),
+                    cv2.cvtColor(fem_rgb, cv2.COLOR_RGB2BGR),
+                )
+                if mpm_rgb is not None:
+                    cv2.imwrite(
+                        str(self.save_dir / f"mpm_{int(frame_id):04d}.png"),
+                        cv2.cvtColor(mpm_rgb, cv2.COLOR_RGB2BGR),
+                    )
+            except Exception as e:
+                print(f"Warning: failed to write frame images for {frame_id}: {e}")
+
+    def run_comparison(self, fps: int = 30, record_interval: int = 5, interactive: bool = True):
         """Run side-by-side comparison visualization"""
         if not HAS_EZGL:
             print("ezgl not available, cannot run visualization")
@@ -2118,8 +2384,112 @@ class RGBComparisonEngine:
         total_frames = len(positions_history) if positions_history else 100
         self._write_run_manifest(record_interval=record_interval, total_frames=total_frames)
 
-        # Create UI
-        self._create_ui(positions_history, fps)
+        if interactive:
+            # Create UI (loops until closed)
+            self._create_ui(positions_history, fps)
+        else:
+            # Headless batch export (run once and exit)
+            self._run_batch(positions_history)
+
+    def _run_batch(self, mpm_positions: List[np.ndarray]) -> None:
+        """Run a finite headless loop to export frames, metrics and intermediates."""
+        if not self.save_dir:
+            print("ERROR: batch mode requires --save-dir")
+            return
+
+        total_frames = len(mpm_positions) if mpm_positions else 100
+        press_steps = SCENE_PARAMS['press_steps']
+        slide_steps = SCENE_PARAMS['slide_steps']
+        hold_steps = SCENE_PARAMS['hold_steps']
+        total_steps = press_steps + slide_steps + hold_steps
+        press_end_ratio = press_steps / total_steps if total_steps > 0 else 0.0
+        slide_end_ratio = (press_steps + slide_steps) / total_steps if total_steps > 0 else 0.0
+
+        # Pre-configure MPM renderer mapping if we have initial particle positions
+        if (
+            self.mpm_renderer
+            and self.mpm_sim
+            and self.mpm_sim.initial_positions_m is not None
+            and mpm_positions
+        ):
+            self.mpm_renderer.configure_from_initial_positions(
+                self.mpm_sim.initial_positions_m, self.mpm_sim.initial_top_z_m
+            )
+            self.mpm_renderer.scene.set_marker_mode(self.mpm_marker_mode)
+            self.mpm_renderer.scene.set_depth_tint_enabled(self.mpm_depth_tint)
+            self.mpm_renderer.scene.set_indenter_overlay(
+                self.mpm_show_indenter, square_size_mm=self.indenter_square_size_mm
+            )
+            self.mpm_renderer.scene.set_debug_overlay(self.mpm_debug_overlay)
+
+        for frame_id in range(int(total_frames)):
+            # Prefer recorded MPM control signals (strict frame alignment)
+            if self.mpm_sim and self.mpm_sim.frame_controls and frame_id < len(self.mpm_sim.frame_controls):
+                press_amount_m, slide_amount_m = self.mpm_sim.frame_controls[frame_id]
+                press_y_mm = float(press_amount_m) * 1000.0
+                slide_x_mm = float(slide_amount_m) * 1000.0
+            else:
+                # Fallback: Use consistent phase ratios with MPM trajectory
+                t = frame_id / max(total_frames - 1, 1)
+                if t < press_end_ratio:
+                    phase_t = t / press_end_ratio if press_end_ratio > 0 else 0
+                    press_y_mm = float(SCENE_PARAMS['press_depth_mm']) * phase_t
+                    slide_x_mm = 0.0
+                elif t < slide_end_ratio:
+                    phase_t = (t - press_end_ratio) / (slide_end_ratio - press_end_ratio) if (slide_end_ratio - press_end_ratio) > 0 else 0
+                    press_y_mm = float(SCENE_PARAMS['press_depth_mm'])
+                    slide_x_mm = float(SCENE_PARAMS['slide_distance_mm']) * phase_t
+                else:
+                    press_y_mm = float(SCENE_PARAMS['press_depth_mm'])
+                    slide_x_mm = float(SCENE_PARAMS['slide_distance_mm'])
+
+            if frame_id % max(total_frames // 10, 1) == 0:
+                print(f"[BATCH] frame={frame_id}/{total_frames-1} press={press_y_mm:.2f}mm slide={slide_x_mm:.2f}mm")
+
+            fem_rgb = None
+            if self.fem_renderer:
+                y_pos_mm = -press_y_mm
+                self.fem_renderer.set_indenter_pose(slide_x_mm, y_pos_mm, 0.0)
+                fem_rgb = self.fem_renderer.step()
+                if self.mode == "diff":
+                    fem_rgb = self.fem_renderer.get_diff_image()
+
+            mpm_rgb = None
+            mpm_height_field = None
+            mpm_uv_disp = None
+            if self.mpm_renderer and self.mpm_sim and mpm_positions and frame_id < len(mpm_positions):
+                pos = mpm_positions[frame_id]
+                indenter_center_m = None
+                if (
+                    self.mpm_sim
+                    and getattr(self.mpm_sim, "frame_indenter_centers_m", None)
+                    and frame_id < len(self.mpm_sim.frame_indenter_centers_m)
+                ):
+                    indenter_center_m = self.mpm_sim.frame_indenter_centers_m[frame_id]
+                mpm_height_field, mpm_uv_disp = self.mpm_renderer.extract_surface_fields(
+                    pos,
+                    self.mpm_sim.initial_top_z_m,
+                    indenter_center_m=indenter_center_m,
+                )
+                self.mpm_renderer.scene.set_uv_displacement(mpm_uv_disp)
+                if self.mode == 'diff':
+                    mpm_rgb = self.mpm_renderer.get_diff_image(mpm_height_field)
+                else:
+                    mpm_rgb = self.mpm_renderer.render(mpm_height_field)
+
+                if self.mpm_show_indenter and self.mpm_sim and self.mpm_sim.frame_controls and frame_id < len(self.mpm_sim.frame_controls):
+                    _, slide_amount_m = self.mpm_sim.frame_controls[frame_id]
+                    self.mpm_renderer.scene.set_indenter_center(float(slide_amount_m) * 1000.0, SCENE_PARAMS['gel_size_mm'][1] / 2.0)
+
+            self._export_frame_artifacts(
+                frame_id=frame_id,
+                fem_rgb=fem_rgb,
+                mpm_rgb=mpm_rgb,
+                mpm_height_field=mpm_height_field,
+                mpm_uv_disp=mpm_uv_disp,
+            )
+
+        print(f"[BATCH] done: frames={total_frames}, save_dir={self.save_dir}")
 
     def _create_ui(self, mpm_positions: List[np.ndarray], fps: int):
         """Create side-by-side image display UI"""
@@ -2218,7 +2588,18 @@ class RGBComparisonEngine:
             mpm_uv_disp = None
             if self.mpm_renderer and mpm_positions and frame_idx[0] < len(mpm_positions):
                 pos = mpm_positions[frame_idx[0]]
-                mpm_height_field, mpm_uv_disp = self.mpm_renderer.extract_surface_fields(pos, self.mpm_sim.initial_top_z_m)
+                indenter_center_m = None
+                if (
+                    self.mpm_sim
+                    and getattr(self.mpm_sim, "frame_indenter_centers_m", None)
+                    and frame_idx[0] < len(self.mpm_sim.frame_indenter_centers_m)
+                ):
+                    indenter_center_m = self.mpm_sim.frame_indenter_centers_m[frame_idx[0]]
+                mpm_height_field, mpm_uv_disp = self.mpm_renderer.extract_surface_fields(
+                    pos,
+                    self.mpm_sim.initial_top_z_m,
+                    indenter_center_m=indenter_center_m,
+                )
                 self.mpm_renderer.scene.set_uv_displacement(mpm_uv_disp)
                 if self.mode == 'diff':
                     mpm_rgb = self.mpm_renderer.get_diff_image(mpm_height_field)
@@ -2232,66 +2613,15 @@ class RGBComparisonEngine:
                     # y 方向用胶体中心做可视化对齐（square 压头在 y 方向不移动）
                     self.mpm_renderer.scene.set_indenter_center(float(slide_amount_m) * 1000.0, SCENE_PARAMS['gel_size_mm'][1] / 2.0)
 
-            # Export metrics / intermediate artifacts (once per frame_id)
             if self.save_dir:
                 frame_id = int(frame_idx[0])
-
-                if fem_rgb is not None and mpm_rgb is not None and frame_id not in self._exported_metrics_frames:
-                    self._exported_metrics_frames.add(frame_id)
-                    try:
-                        metrics = _compute_rgb_diff_metrics(fem_rgb, mpm_rgb)
-                        phase = None
-                        if self._frame_to_phase is not None and frame_id < len(self._frame_to_phase):
-                            phase = self._frame_to_phase[frame_id]
-                        self._metrics_rows.append(
-                            {
-                                "frame": int(frame_id),
-                                "phase": phase,
-                                "mode": str(self.mode),
-                                **metrics,
-                            }
-                        )
-                        self._write_metrics_files()
-                    except Exception as e:
-                        print(f"Warning: failed to compute metrics for frame {frame_id}: {e}")
-
-                if self.export_intermediate and frame_id not in self._exported_intermediate_frames:
-                    self._exported_intermediate_frames.add(frame_id)
-                    every = int(self.export_intermediate_every) if int(self.export_intermediate_every) > 0 else 1
-                    if frame_id % every == 0:
-                        fem_depth_mm = None
-                        fem_marker_disp = None
-                        fem_contact_mask_u8 = None
-                        if self.fem_renderer is not None:
-                            try:
-                                fem_depth_mm = self.fem_renderer.sensor_sim.get_depth()
-                            except Exception:
-                                pass
-                            try:
-                                fem_marker_disp = self.fem_renderer.sensor_sim.get_marker_displacement()
-                            except Exception:
-                                pass
-                            fem_contact_mask_u8 = self._compute_fem_contact_mask_u8()
-                        self._export_intermediate_frame(
-                            frame=frame_id,
-                            mpm_height_field_mm=mpm_height_field,
-                            mpm_uv_disp_mm=mpm_uv_disp,
-                            fem_depth_mm=fem_depth_mm,
-                            fem_marker_disp=fem_marker_disp,
-                            fem_contact_mask_u8=fem_contact_mask_u8,
-                        )
-
-            # Save frame if requested
-            if self.save_dir and HAS_CV2 and fem_rgb is not None:        
-                cv2.imwrite(
-                    str(self.save_dir / f"fem_{frame_idx[0]:04d}.png"),  
-                    cv2.cvtColor(fem_rgb, cv2.COLOR_RGB2BGR)
+                self._export_frame_artifacts(
+                    frame_id=frame_id,
+                    fem_rgb=fem_rgb,
+                    mpm_rgb=mpm_rgb,
+                    mpm_height_field=mpm_height_field,
+                    mpm_uv_disp=mpm_uv_disp,
                 )
-                if mpm_rgb is not None:
-                    cv2.imwrite(
-                        str(self.save_dir / f"mpm_{frame_idx[0]:04d}.png"),
-                        cv2.cvtColor(mpm_rgb, cv2.COLOR_RGB2BGR)
-                    )
 
             frame_idx[0] = (frame_idx[0] + 1) % total_frames
 
@@ -2333,12 +2663,14 @@ def main():
         help='Path to indenter STL file (default: sphere)'
     )
     parser.add_argument(
-        '--fem-indenter-face', type=str, choices=['base', 'tip'], default='base',
+        '--fem-indenter-face', type=str, choices=['base', 'tip'], default='tip',
         help='FEM indenter STL face selection: base (y_min, may look like square base) or tip (y_max, round tip)'
     )
     parser.add_argument(
         '--fem-indenter-geom', type=str, choices=['auto', 'stl', 'box', 'sphere'], default='auto',
-        help='FEM indenter geometry: auto (match MPM indenter-type when no --object-file), stl, box, sphere'
+        help=('FEM indenter geometry: auto (stl when --object-file is set or when '
+              'MPM indenter-type=cylinder; otherwise match MPM indenter-type), '
+              'stl, box, sphere')
     )
     parser.add_argument(
         '--mode', type=str, choices=['raw', 'diff'], default='raw',
@@ -2361,8 +2693,12 @@ def main():
         help='Record MPM positions every N steps (affects total frames and phase mapping)'
     )
     parser.add_argument(
-        '--indenter-type', type=str, choices=['sphere', 'box'], default='box',
-        help='MPM indenter type: sphere (curved) or box (flat bottom, matches cylinder STL)'
+        '--indenter-type',
+        type=str,
+        choices=['sphere', 'cylinder', 'box'],
+        default=str(SCENE_PARAMS.get('indenter_type', 'cylinder')),
+        help=('MPM indenter type: sphere (curved) | cylinder (flat round, matches '
+              'circle_r4.STL tip) | box (flat square)')
     )
     parser.add_argument(
         '--fric', type=float, default=None,
@@ -2382,6 +2718,34 @@ def main():
         help='MPM kinetic friction coefficient mu_k (overrides --fric for MPM side)'
     )
     parser.add_argument(
+        '--mpm-k-normal', type=float, default=None,
+        help='MPM contact stiffness (normal) (overrides scene default)'
+    )
+    parser.add_argument(
+        '--mpm-k-tangent', type=float, default=None,
+        help='MPM contact stiffness (tangent) (overrides scene default)'
+    )
+    parser.add_argument(
+        '--mpm-dt', type=float, default=None,
+        help='MPM time step dt in seconds (overrides scene default)'
+    )
+    parser.add_argument(
+        '--mpm-ogden-mu', type=float, default=None,
+        help='MPM Ogden shear modulus mu in Pa (overrides scene default; sets single-term Ogden)'
+    )
+    parser.add_argument(
+        '--mpm-ogden-kappa', type=float, default=None,
+        help='MPM Ogden bulk modulus kappa in Pa (overrides scene default)'
+    )
+    parser.add_argument(
+        '--mpm-enable-bulk-viscosity', type=str, choices=['on', 'off'], default=None,
+        help='Enable Kelvin-Voigt bulk viscosity for MPM: on|off'
+    )
+    parser.add_argument(
+        '--mpm-bulk-viscosity', type=float, default=None,
+        help='MPM bulk viscosity coefficient eta_bulk in Pa*s (enables bulk viscosity if provided)'
+    )
+    parser.add_argument(
         '--fem-marker', type=str, choices=['on', 'off'], default='on',
         help='FEM marker rendering: on|off (off = white background for shading comparison)'
     )
@@ -2394,7 +2758,7 @@ def main():
         help='MPM depth tint overlay on marker texture: on|off'
     )
     parser.add_argument(
-        '--mpm-height-fill-holes', type=str, choices=['on', 'off'], default='off',
+        '--mpm-height-fill-holes', type=str, choices=['on', 'off'], default='on',
         help='MPM height_field hole filling (diffusion) before rendering: on|off'
     )
     parser.add_argument(
@@ -2408,6 +2772,14 @@ def main():
     parser.add_argument(
         '--mpm-height-smooth-iters', type=int, default=int(SCENE_PARAMS.get("mpm_height_smooth_iters", 2)),
         help='Box blur iterations for --mpm-height-smooth (default: 2)'
+    )
+    parser.add_argument(
+        '--mpm-height-reference-edge', type=str, choices=['on', 'off'], default='on',
+        help='MPM height_field baseline reference: edge (on) vs none (off)'
+    )
+    parser.add_argument(
+        '--mpm-height-clamp-indenter', type=str, choices=['on', 'off'], default='on',
+        help='Clamp MPM height_field not below indenter surface (suppress penetration artifacts): on|off'
     )
     parser.add_argument(
         '--mpm-show-indenter', action='store_true', default=False,
@@ -2428,6 +2800,10 @@ def main():
     parser.add_argument(
         '--save-dir', type=str, default=None,
         help='Directory to save frame images'
+    )
+    parser.add_argument(
+        '--interactive', action='store_true', default=False,
+        help='Run interactive UI loop (default: headless batch when --save-dir is set)'
     )
     parser.add_argument(
         '--export-intermediate', action='store_true', default=False,
@@ -2451,12 +2827,25 @@ def main():
             print(f"ERROR: {name} must be >= 0")
             return False
         return True
+    def _validate_pos(name: str, value: Optional[float]) -> bool:
+        if value is None:
+            return True
+        if float(value) <= 0.0:
+            print(f"ERROR: {name} must be > 0")
+            return False
+        return True
 
     if not (
         _validate_nonneg("--fric", args.fric)
         and _validate_nonneg("--fem-fric", args.fem_fric)
         and _validate_nonneg("--mpm-mu-s", args.mpm_mu_s)
         and _validate_nonneg("--mpm-mu-k", args.mpm_mu_k)
+        and _validate_nonneg("--mpm-k-normal", args.mpm_k_normal)
+        and _validate_nonneg("--mpm-k-tangent", args.mpm_k_tangent)
+        and _validate_pos("--mpm-dt", args.mpm_dt)
+        and _validate_pos("--mpm-ogden-mu", args.mpm_ogden_mu)
+        and _validate_pos("--mpm-ogden-kappa", args.mpm_ogden_kappa)
+        and _validate_nonneg("--mpm-bulk-viscosity", args.mpm_bulk_viscosity)
     ):
         return 1
 
@@ -2475,10 +2864,28 @@ def main():
     SCENE_PARAMS['slide_distance_mm'] = args.slide_mm
     SCENE_PARAMS['indenter_type'] = args.indenter_type
     SCENE_PARAMS['debug_verbose'] = args.debug
+    if args.mpm_dt is not None:
+        SCENE_PARAMS['mpm_dt'] = float(args.mpm_dt)
+    if args.mpm_ogden_mu is not None:
+        SCENE_PARAMS['ogden_mu'] = [float(args.mpm_ogden_mu)]
+        # 保持与单项 mu 对齐，避免长度不一致导致本构计算混淆
+        if isinstance(SCENE_PARAMS.get('ogden_alpha'), list) and len(SCENE_PARAMS['ogden_alpha']) != 1:
+            SCENE_PARAMS['ogden_alpha'] = [float(SCENE_PARAMS['ogden_alpha'][0])]
+    if args.mpm_ogden_kappa is not None:
+        SCENE_PARAMS['ogden_kappa'] = float(args.mpm_ogden_kappa)
+    if args.mpm_enable_bulk_viscosity is not None:
+        SCENE_PARAMS["mpm_enable_bulk_viscosity"] = (str(args.mpm_enable_bulk_viscosity).lower().strip() == "on")
+    if args.mpm_bulk_viscosity is not None:
+        SCENE_PARAMS["mpm_bulk_viscosity"] = float(args.mpm_bulk_viscosity)
+        # 用户显式提供 eta_bulk 时，默认启用体粘性（除非显式 --mpm-enable-bulk-viscosity off）
+        if str(args.mpm_enable_bulk_viscosity).lower().strip() != "off":
+            SCENE_PARAMS["mpm_enable_bulk_viscosity"] = True
     SCENE_PARAMS["mpm_height_fill_holes"] = (str(args.mpm_height_fill_holes).lower().strip() == "on")
     SCENE_PARAMS["mpm_height_fill_holes_iters"] = int(args.mpm_height_fill_holes_iters)
     SCENE_PARAMS["mpm_height_smooth"] = (str(args.mpm_height_smooth).lower().strip() != "off")
     SCENE_PARAMS["mpm_height_smooth_iters"] = int(args.mpm_height_smooth_iters)
+    SCENE_PARAMS["mpm_height_reference_edge"] = (str(args.mpm_height_reference_edge).lower().strip() != "off")
+    SCENE_PARAMS["mpm_height_clamp_indenter"] = (str(args.mpm_height_clamp_indenter).lower().strip() != "off")
 
     if args.fric is not None:
         fric = float(args.fric)
@@ -2491,6 +2898,10 @@ def main():
         SCENE_PARAMS["mpm_mu_s"] = float(args.mpm_mu_s)
     if args.mpm_mu_k is not None:
         SCENE_PARAMS["mpm_mu_k"] = float(args.mpm_mu_k)
+    if args.mpm_k_normal is not None:
+        SCENE_PARAMS["mpm_contact_stiffness_normal"] = float(args.mpm_k_normal)
+    if args.mpm_k_tangent is not None:
+        SCENE_PARAMS["mpm_contact_stiffness_tangent"] = float(args.mpm_k_tangent)
 
     if args.indenter_size_mm is not None:
         square_d_mm = float(args.indenter_size_mm)
@@ -2523,6 +2934,16 @@ def main():
     mpm_mu_k = float(SCENE_PARAMS.get("mpm_mu_k", 1.5))
     aligned_fric = (abs(fem_fric - mpm_mu_s) < 1e-9) and (abs(fem_fric - mpm_mu_k) < 1e-9)
     print(f"Friction: FEM fric_coef={fem_fric:.4g}, MPM mu_s={mpm_mu_s:.4g}, mu_k={mpm_mu_k:.4g}, aligned={aligned_fric}")
+    k_n = float(SCENE_PARAMS.get("mpm_contact_stiffness_normal", 0.0))
+    k_t = float(SCENE_PARAMS.get("mpm_contact_stiffness_tangent", 0.0))
+    print(f"MPM contact stiffness: k_n={k_n:.4g}, k_t={k_t:.4g}")
+    print(
+        f"MPM material: ogden_mu={SCENE_PARAMS.get('ogden_mu')}, "
+        f"ogden_alpha={SCENE_PARAMS.get('ogden_alpha')}, "
+        f"ogden_kappa={SCENE_PARAMS.get('ogden_kappa')}, "
+        f"bulk_viscosity={'on' if bool(SCENE_PARAMS.get('mpm_enable_bulk_viscosity', False)) else 'off'} "
+        f"(eta={float(SCENE_PARAMS.get('mpm_bulk_viscosity', 0.0)):.4g})"
+    )
 
     gel_w_mm, gel_h_mm = [float(v) for v in SCENE_PARAMS.get("gel_size_mm", (0.0, 0.0))]
     cam_w_mm = float(SCENE_PARAMS.get("cam_view_width_m", 0.0)) * 1000.0
@@ -2541,7 +2962,13 @@ def main():
 
     fem_indenter_geom = args.fem_indenter_geom
     if fem_indenter_geom == "auto":
-        fem_indenter_geom = "stl" if args.object_file else args.indenter_type
+        if args.object_file:
+            fem_indenter_geom = "stl"
+        elif str(args.indenter_type).lower().strip() == "cylinder":
+            # FEM 侧没有 cylinder primitive，使用 circle_r4.STL (tip) 作为圆柱压头基线。
+            fem_indenter_geom = "stl"
+        else:
+            fem_indenter_geom = args.indenter_type
     print(f"FEM indenter geom: {fem_indenter_geom}")
     if args.object_file and fem_indenter_geom != "stl":
         print(f"Note: --object-file is ignored because --fem-indenter-geom={fem_indenter_geom}")
@@ -2565,6 +2992,22 @@ def main():
         }
         print(f"Indenter size (box, mm): half_extents=({hx_mm:.2f}, {hy_mm:.2f}, {hz_mm:.2f}), "
               f"full=({hx_mm*2:.2f}, {hy_mm*2:.2f}, {hz_mm*2:.2f})")
+    elif args.indenter_type == "cylinder":
+        r_mm = float(SCENE_PARAMS["indenter_radius_mm"])
+        half_h_mm = SCENE_PARAMS.get("indenter_cylinder_half_height_mm", None)
+        if half_h_mm is None:
+            half_h_mm = r_mm
+        half_h_mm = float(half_h_mm)
+        mpm_indenter_size = {
+            "radius_mm": float(r_mm),
+            "diameter_mm": float(r_mm * 2.0),
+            "half_height_mm": float(half_h_mm),
+            "height_mm": float(half_h_mm * 2.0),
+        }
+        print(
+            f"Indenter size (cylinder, mm): radius={r_mm:.2f}, diameter={r_mm*2:.2f}, "
+            f"height={half_h_mm*2:.2f}"
+        )
     else:
         r_mm = float(SCENE_PARAMS["indenter_radius_mm"])
         mpm_indenter_size = {
@@ -2665,12 +3108,18 @@ def main():
                 "mpm_height_fill_holes_iters": int(SCENE_PARAMS.get("mpm_height_fill_holes_iters", 0)),
                 "mpm_height_smooth": bool(SCENE_PARAMS.get("mpm_height_smooth", True)),
                 "mpm_height_smooth_iters": int(SCENE_PARAMS.get("mpm_height_smooth_iters", 0)),
+                "mpm_height_reference_edge": bool(SCENE_PARAMS.get("mpm_height_reference_edge", True)),
+                "mpm_height_clamp_indenter": bool(SCENE_PARAMS.get("mpm_height_clamp_indenter", True)),
             },
             "friction": {
                 "fem_fric_coef": float(fem_fric),
                 "mpm_mu_s": float(mpm_mu_s),
                 "mpm_mu_k": float(mpm_mu_k),
                 "aligned": bool(aligned_fric),
+            },
+            "contact": {
+                "mpm_contact_stiffness_normal": float(k_n),
+                "mpm_contact_stiffness_tangent": float(k_t),
             },
             "render": {
                 "mpm_marker": str(args.mpm_marker),
@@ -2713,6 +3162,8 @@ def main():
     if not HAS_TAICHI:
         print("WARNING: Taichi not available, MPM will be disabled")
 
+    interactive = bool(args.interactive) or not bool(args.save_dir)
+
     # Run comparison
     engine = RGBComparisonEngine(
         fem_file=args.fem_file,
@@ -2733,7 +3184,11 @@ def main():
     if square_d_mm is not None:
         engine.indenter_square_size_mm = float(square_d_mm)
     engine.run_context = run_context
-    engine.run_comparison(fps=args.fps, record_interval=int(args.record_interval))
+    engine.run_comparison(
+        fps=args.fps,
+        record_interval=int(args.record_interval),
+        interactive=interactive,
+    )
 
     return 0
 
