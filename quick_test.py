@@ -185,10 +185,14 @@ def main() -> int:
         "--mpm-height-fill-holes-iters",
         "--mpm-height-smooth",
         "--mpm-height-smooth-iters",
+        "--mpm-height-reference-edge",
+        "--mpm-height-clamp-indenter",
+        "--mpm-height-clip-outliers",
+        "--mpm-height-clip-outliers-min-mm",
         "--export-intermediate",
     ]:
         if flag not in help_text:
-            return _fail(f"Missing CLI flag in --help output: {flag}")   
+            return _fail(f"Missing CLI flag in --help output: {flag}")
 
     # 7) Preflight run manifest helper invariants (no UI / no blocking).
     write_preflight = module["_write_preflight_run_manifest"]
@@ -203,6 +207,10 @@ def main() -> int:
         "mpm_height_fill_holes_iters": 10,
         "mpm_height_smooth": True,
         "mpm_height_smooth_iters": 2,
+        "mpm_height_reference_edge": True,
+        "mpm_height_clamp_indenter": True,
+        "mpm_height_clip_outliers": False,
+        "mpm_height_clip_outliers_min_mm": 5.0,
     }
 
     def _read_manifest(manifest_path: Path) -> Dict[str, object]:

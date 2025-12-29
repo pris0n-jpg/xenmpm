@@ -149,6 +149,11 @@ SCENE_PARAMS = {
     'mpm_height_smooth': True,          # apply box smoothing before rendering
     'mpm_height_smooth_iters': 2,       # matches previous hardcoded behavior
     'mpm_height_reference_edge': True,  # use edge-region baseline alignment (preserve slide motion)
+    # Height-field outlier suppression (MPM -> render)
+    # NOTE: 仅作为“最后一道防线”，避免 footprint 外的异常深值把整块区域渲染成暗盘/彩虹 halo。
+    # 默认关闭以保持基线行为不变；建议与 fill_holes 联用。
+    'mpm_height_clip_outliers': False,
+    'mpm_height_clip_outliers_min_mm': 5.0,  # 超过该负向深度（mm）的值会被视作离群并置为 NaN
     # IMPORTANT: MPM 接触采用 penalty 形式时，压头可能“穿透”粒子表面并导致高度场过深，
     # 从而出现非物理的“整块发黑/暗盘”。该开关会把 height_field 限制在“不低于压头表面”。
     'mpm_height_clamp_indenter': True,
@@ -1132,6 +1137,50 @@ class MPMHeightFieldRenderer:
             except Exception as e:
                 if SCENE_PARAMS.get("debug_verbose", False):
                     print(f"[MPM HEIGHT] clamp_to_indenter failed: {e}")
+
+        # 可选：footprint 外离群深值裁剪（避免“深坑”把整块区域渲染成暗盘/彩虹 halo）
+        if bool(SCENE_PARAMS.get("mpm_height_clip_outliers", False)):
+            clip_min = float(SCENE_PARAMS.get("mpm_height_clip_outliers_min_mm", 0.0))
+            if clip_min > 0.0:
+                floor_mm = -abs(clip_min)
+                footprint_mask = None
+                if indenter_center_m is not None:
+                    try:
+                        cx_mm = float(indenter_center_m[0]) * 1000.0 - float(self._x_center_mm)
+                        cy_mm = float(indenter_center_m[1]) * 1000.0 - float(self._y_min_mm)
+
+                        x_centers = (np.arange(n_col, dtype=np.float32) + 0.5) * np.float32(cell_w) - np.float32(gel_w_mm / 2.0)
+                        y_centers = (np.arange(n_row, dtype=np.float32) + 0.5) * np.float32(cell_h)
+                        xx, yy = np.meshgrid(x_centers, y_centers)
+
+                        indenter_type = str(SCENE_PARAMS.get("indenter_type", "box")).lower().strip()
+                        if indenter_type in {"sphere", "cylinder"}:
+                            r_mm = float(SCENE_PARAMS.get("indenter_radius_mm", 4.0))
+                            footprint_mask = ((xx - np.float32(cx_mm)) ** 2 + (yy - np.float32(cy_mm)) ** 2) <= np.float32(r_mm) ** 2
+                        else:
+                            half_extents_mm = SCENE_PARAMS.get("indenter_half_extents_mm", None)
+                            if half_extents_mm is not None and len(half_extents_mm) == 3:
+                                hx_mm, hy_mm, _ = [float(v) for v in half_extents_mm]
+                            else:
+                                r_mm = float(SCENE_PARAMS.get("indenter_radius_mm", 4.0))
+                                hx_mm = hy_mm = float(r_mm)
+                            footprint_mask = (np.abs(xx - np.float32(cx_mm)) <= np.float32(hx_mm)) & (np.abs(yy - np.float32(cy_mm)) <= np.float32(hy_mm))
+                    except Exception as e:
+                        footprint_mask = None
+                        if SCENE_PARAMS.get("debug_verbose", False):
+                            print(f"[MPM HEIGHT] footprint_mask failed: {e}")
+
+                try:
+                    if footprint_mask is not None and isinstance(footprint_mask, np.ndarray):
+                        outliers = (~footprint_mask) & np.isfinite(height_field) & (height_field < floor_mm)
+                    else:
+                        outliers = np.isfinite(height_field) & (height_field < floor_mm)
+                    if outliers.any():
+                        height_field[outliers] = np.nan
+                        valid_mask = np.isfinite(height_field)
+                except Exception as e:
+                    if SCENE_PARAMS.get("debug_verbose", False):
+                        print(f"[MPM HEIGHT] clip_outliers failed: {e}")
 
         # Fill holes after baseline alignment to avoid converting holes into small positive bumps
         # (which get clamped to 0 and create hard edges / rainbow halos after shading).
@@ -2785,6 +2834,14 @@ def main():
         help='Clamp MPM height_field not below indenter surface (suppress penetration artifacts): on|off'
     )
     parser.add_argument(
+        '--mpm-height-clip-outliers', type=str, choices=['on', 'off'], default='off',
+        help='Clip extreme negative MPM height_field outside indenter footprint: on|off'
+    )
+    parser.add_argument(
+        '--mpm-height-clip-outliers-min-mm', type=float, default=float(SCENE_PARAMS.get("mpm_height_clip_outliers_min_mm", 5.0)),
+        help='Negative depth threshold in mm for --mpm-height-clip-outliers (default: 5.0)'
+    )
+    parser.add_argument(
         '--mpm-show-indenter', action='store_true', default=False,
         help='Overlay MPM indenter projection in the RGB view (2D overlay)'
     )
@@ -2861,6 +2918,9 @@ def main():
     if int(args.mpm_height_smooth_iters) < 0:
         print("ERROR: --mpm-height-smooth-iters must be >= 0")
         return 1
+    if str(args.mpm_height_clip_outliers).lower().strip() == "on" and float(args.mpm_height_clip_outliers_min_mm) <= 0.0:
+        print("ERROR: --mpm-height-clip-outliers-min-mm must be > 0 when --mpm-height-clip-outliers on")
+        return 1
 
     # Update scene params from args
     SCENE_PARAMS['press_depth_mm'] = args.press_mm
@@ -2889,6 +2949,8 @@ def main():
     SCENE_PARAMS["mpm_height_smooth_iters"] = int(args.mpm_height_smooth_iters)
     SCENE_PARAMS["mpm_height_reference_edge"] = (str(args.mpm_height_reference_edge).lower().strip() != "off")
     SCENE_PARAMS["mpm_height_clamp_indenter"] = (str(args.mpm_height_clamp_indenter).lower().strip() != "off")
+    SCENE_PARAMS["mpm_height_clip_outliers"] = (str(args.mpm_height_clip_outliers).lower().strip() == "on")
+    SCENE_PARAMS["mpm_height_clip_outliers_min_mm"] = float(args.mpm_height_clip_outliers_min_mm)
 
     if args.fric is not None:
         fric = float(args.fric)
@@ -3060,7 +3122,11 @@ def main():
         f"fill_holes={bool(SCENE_PARAMS.get('mpm_height_fill_holes', False))} "
         f"(iters={int(SCENE_PARAMS.get('mpm_height_fill_holes_iters', 0))}), "
         f"smooth={bool(SCENE_PARAMS.get('mpm_height_smooth', True))} "
-        f"(iters={int(SCENE_PARAMS.get('mpm_height_smooth_iters', 0))})"
+        f"(iters={int(SCENE_PARAMS.get('mpm_height_smooth_iters', 0))}), "
+        f"ref_edge={bool(SCENE_PARAMS.get('mpm_height_reference_edge', True))}, "
+        f"clamp_indenter={bool(SCENE_PARAMS.get('mpm_height_clamp_indenter', True))}, "
+        f"clip_outliers={bool(SCENE_PARAMS.get('mpm_height_clip_outliers', False))} "
+        f"(min_mm={float(SCENE_PARAMS.get('mpm_height_clip_outliers_min_mm', 0.0)):.3f})"
     )
     if args.mpm_show_indenter:
         print("MPM indenter overlay: enabled")
@@ -3113,6 +3179,8 @@ def main():
                 "mpm_height_smooth_iters": int(SCENE_PARAMS.get("mpm_height_smooth_iters", 0)),
                 "mpm_height_reference_edge": bool(SCENE_PARAMS.get("mpm_height_reference_edge", True)),
                 "mpm_height_clamp_indenter": bool(SCENE_PARAMS.get("mpm_height_clamp_indenter", True)),
+                "mpm_height_clip_outliers": bool(SCENE_PARAMS.get("mpm_height_clip_outliers", False)),
+                "mpm_height_clip_outliers_min_mm": float(SCENE_PARAMS.get("mpm_height_clip_outliers_min_mm", 0.0)),
             },
             "friction": {
                 "fem_fric_coef": float(fem_fric),
