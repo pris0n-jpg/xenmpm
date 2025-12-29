@@ -195,7 +195,7 @@ def main() -> int:
     default_conventions = {
         "mpm_height_field_flip_x": True,
         "mpm_uv_disp_flip_x": True,
-        "mpm_uv_disp_u_negate": True,
+        "mpm_uv_disp_u_negate": False,
         "mpm_warp_flip_x": True,
         "mpm_warp_flip_y": True,
         "mpm_overlay_flip_x_mm": True,

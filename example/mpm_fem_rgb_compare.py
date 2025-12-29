@@ -520,6 +520,10 @@ def warp_marker_texture(
     map_y = yy - dy_px.astype(np.float32)
 
     if HAS_CV2:
+        # 与 numpy fallback 的 clip 行为保持一致，避免 remap 出界触发反射边界
+        # （典型现象：边缘 marker 被抻成短线/拖影，干扰方向/量级归因）。
+        map_x = np.clip(map_x, 0.0, tex_w - 1.001).astype(np.float32, copy=False)
+        map_y = np.clip(map_y, 0.0, tex_h - 1.001).astype(np.float32, copy=False)
         return cv2.remap(
             base_tex,
             map_x,
@@ -1485,9 +1489,8 @@ class MPMSensorScene(Scene):
         else:
             # CRITICAL: Apply same horizontal flip as height_field to match mesh x_range convention
             # height_field is flipped with [:, ::-1], so UV must be too
-            # Additionally, flip u-component sign since x-direction is reversed
             uv_flipped = _mpm_flip_x_field(uv_disp_mm).copy()
-            uv_flipped[..., 0] = -uv_flipped[..., 0]  # negate u (x displacement)
+            # NOTE: u 分量的“方向反转”由 warp 的 flip_x 统一处理，避免同一轴被多处重复修正。
             self._uv_disp_mm = uv_flipped.astype(np.float32, copy=False)
         # 在 warp 模式下，每帧都需要更新纹理
         if self._marker_mode == "warp":
@@ -3100,7 +3103,7 @@ def main():
             "conventions": {
                 "mpm_height_field_flip_x": True,
                 "mpm_uv_disp_flip_x": True,
-                "mpm_uv_disp_u_negate": True,
+                "mpm_uv_disp_u_negate": False,
                 "mpm_warp_flip_x": True,
                 "mpm_warp_flip_y": True,
                 "mpm_overlay_flip_x_mm": True,
