@@ -133,6 +133,18 @@ def _validate_images(save_dir: Path, *, has_cv2: bool, total_frames: int) -> Non
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Validate outputs of mpm_fem_rgb_compare --save-dir")
     parser.add_argument("--save-dir", type=str, required=True, help="Output directory produced by mpm_fem_rgb_compare")
+    parser.add_argument(
+        "--require-alignment",
+        action="store_true",
+        default=False,
+        help="Require friction/scale/indenter alignment info in run_manifest.json (resolved.*)",
+    )
+    parser.add_argument(
+        "--require-indenter-overlay",
+        action="store_true",
+        default=False,
+        help="Require args.mpm_show_indenter=true in run_manifest.json",
+    )
     args = parser.parse_args(argv)
 
     save_dir = Path(args.save_dir)
@@ -155,9 +167,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _fail(f"Invalid metrics: {e}")
 
     run_context = manifest.get("run_context") or {}
+    args_dict = {}
     resolved = {}
     if isinstance(run_context, dict):
+        args_dict = run_context.get("args") or {}
         resolved = run_context.get("resolved") or {}
+
+    if args.require_alignment:
+        if not isinstance(resolved, dict):
+            return _fail("Missing run_context.resolved in run_manifest.json (required by --require-alignment)")
+        friction = resolved.get("friction") or {}
+        scale = resolved.get("scale") or {}
+        indenter = resolved.get("indenter") or {}
+        fem_indenter = indenter.get("fem") if isinstance(indenter, dict) else None
+        mpm_indenter = indenter.get("mpm") if isinstance(indenter, dict) else None
+        if not (isinstance(friction, dict) and bool(friction.get("aligned")) is True):
+            return _fail(f"friction.aligned is not true: {friction}")
+        if not (isinstance(scale, dict) and bool(scale.get("consistent")) is True):
+            return _fail(f"scale.consistent is not true: {scale}")
+        if not (isinstance(fem_indenter, dict) and fem_indenter.get("face") and fem_indenter.get("contact_face_key")):
+            return _fail(f"Missing FEM indenter face/contact_face_key: {fem_indenter}")
+        if not (isinstance(mpm_indenter, dict) and mpm_indenter.get("type")):
+            return _fail(f"Missing MPM indenter type: {mpm_indenter}")
+
+    if args.require_indenter_overlay:
+        if not isinstance(args_dict, dict):
+            return _fail("Missing run_context.args in run_manifest.json (required by --require-indenter-overlay)")
+        if bool(args_dict.get("mpm_show_indenter")) is not True:
+            return _fail(f"args.mpm_show_indenter is not true: {args_dict.get('mpm_show_indenter')!r}")
     export = resolved.get("export") if isinstance(resolved, dict) else None
     export_enabled = bool(export.get("intermediate")) if isinstance(export, dict) else bool((save_dir / "intermediate").exists())
 
@@ -178,4 +215,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
