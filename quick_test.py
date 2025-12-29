@@ -232,6 +232,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
         run_context = {
+            "args": {
+                # Ensure save_dir does not leak into run_manifest.json (argv already records it).
+                "save_dir": str(tmp_dir),
+                "mpm_show_indenter": True,
+            },
             "resolved": {
                 "conventions": dict(default_conventions),
                 "render": {
@@ -268,7 +273,17 @@ def main() -> int:
         except Exception as e:
             return _fail(f"Invalid run_manifest.json (default): {e}")
 
-        resolved = (manifest.get("run_context") or {}).get("resolved") or {}
+        if not (tmp_dir / "tuning_notes.md").exists():
+            return _fail("Missing tuning_notes.md after _write_preflight_run_manifest")
+
+        args_out = ((manifest.get("run_context") or {}).get("args") or {})
+        if isinstance(args_out, dict):
+            if "save_dir" in args_out:
+                return _fail(f"run_manifest.json should not contain args.save_dir: {args_out}")
+            if args_out.get("mpm_show_indenter") is not True:
+                return _fail(f"Unexpected run_manifest.json args.mpm_show_indenter: {args_out}")
+
+        resolved = (manifest.get("run_context") or {}).get("resolved") or {}    
         render = resolved.get("render") or {}
         for key in ["mpm_marker", "mpm_depth_tint", "fem_marker"]:
             if key not in render:
