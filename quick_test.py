@@ -241,7 +241,7 @@ def main() -> int:
                 "conventions": dict(default_conventions),
                 "render": {
                     "fem_marker": "on",
-                    "mpm_marker": "static",
+                    "mpm_marker": "warp",
                     "mpm_depth_tint": True,
                 },
                 "friction": {

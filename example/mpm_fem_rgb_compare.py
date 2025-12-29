@@ -2245,7 +2245,7 @@ class RGBComparisonEngine:
         if HAS_TAICHI:
             self.mpm_sim = MPMSimulationAdapter()
         self.fem_show_marker = True
-        self.mpm_marker_mode = "static"
+        self.mpm_marker_mode = "warp"
         self.mpm_depth_tint = True
         self.mpm_show_indenter = False
         self.mpm_debug_overlay = "off"
@@ -2952,7 +2952,7 @@ def main():
         help='FEM marker rendering: on|off (off = white background for shading comparison)'
     )
     parser.add_argument(
-        '--mpm-marker', type=str, choices=['off', 'static', 'warp'], default='static',
+        '--mpm-marker', type=str, choices=['off', 'static', 'warp'], default='warp',
         help='MPM marker rendering: off|static|warp (warp reflects stretch/shear from tangential displacement)'
     )
     parser.add_argument(
