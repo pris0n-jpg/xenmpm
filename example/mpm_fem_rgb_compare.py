@@ -597,6 +597,130 @@ def _compute_rgb_diff_metrics(a_rgb: np.ndarray, b_rgb: np.ndarray) -> Dict[str,
     }
 
 
+def _sanitize_run_context_for_manifest(run_context: Dict[str, object]) -> Dict[str, object]:
+    """
+    Keep run_manifest diff-friendly by removing volatile/sensitive fields from run_context.
+
+    Notes:
+    - argv is already recorded in run_manifest.json; avoid duplicating save_dir or other
+      environment-dependent paths in run_context.args.
+    - Keep resolved.* for audit / alignment checks.
+    """
+    if not isinstance(run_context, dict):
+        return {}
+    sanitized: Dict[str, object] = {}
+    resolved = run_context.get("resolved")
+    if isinstance(resolved, dict):
+        sanitized["resolved"] = resolved
+    args = run_context.get("args")
+    if isinstance(args, dict):
+        args_copy = dict(args)
+        args_copy.pop("save_dir", None)
+        sanitized["args"] = args_copy
+    return sanitized
+
+
+def _write_tuning_notes(
+    save_dir: Path,
+    *,
+    record_interval: int,
+    total_frames: int,
+    run_context: Dict[str, object],
+    overwrite: bool = False,
+    reason: Optional[str] = None,
+) -> None:
+    """
+    Write a stable, human-editable tuning_notes.md alongside run_manifest.json.
+
+    The file is intended to be diff-friendly (avoid timestamps) and can be edited
+    by humans after the run without being clobbered by default.
+    """
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    notes_path = save_dir / "tuning_notes.md"
+    if notes_path.exists() and not overwrite:
+        return
+
+    press_steps = int(SCENE_PARAMS["press_steps"])
+    slide_steps = int(SCENE_PARAMS["slide_steps"])
+    hold_steps = int(SCENE_PARAMS["hold_steps"])
+
+    def _phase_for_step(step: int) -> str:
+        if step < press_steps:
+            return "press"
+        if step < press_steps + slide_steps:
+            return "slide"
+        return "hold"
+
+    frame_to_step = [int(i * int(record_interval)) for i in range(int(total_frames))]
+    frame_to_phase = [_phase_for_step(step) for step in frame_to_step]
+
+    phase_ranges: Dict[str, Dict[str, int]] = {}
+    for i, phase in enumerate(frame_to_phase):
+        if phase not in phase_ranges:
+            phase_ranges[phase] = {"start_frame": i, "end_frame": i}
+        else:
+            phase_ranges[phase]["end_frame"] = i
+
+    def _pick_mid(start: int, end: int) -> int:
+        return int((int(start) + int(end)) // 2)
+
+    key_frames: Dict[str, Optional[int]] = {
+        "press_end": None,
+        "slide_mid": None,
+        "hold_end": None,
+    }
+    if "press" in phase_ranges:
+        key_frames["press_end"] = int(phase_ranges["press"]["end_frame"])
+    if "slide" in phase_ranges:
+        key_frames["slide_mid"] = _pick_mid(phase_ranges["slide"]["start_frame"], phase_ranges["slide"]["end_frame"])
+    if "hold" in phase_ranges:
+        key_frames["hold_end"] = int(phase_ranges["hold"]["end_frame"])
+
+    resolved = run_context.get("resolved") if isinstance(run_context, dict) else None
+    resolved_dict: Dict[str, object] = resolved if isinstance(resolved, dict) else {}
+
+    def _dump(obj: object) -> str:
+        return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True)
+
+    lines: List[str] = []
+    lines.append("# Tuning Notes (mpm_fem_rgb_compare)")
+    lines.append("")
+    lines.append("## Baseline command")
+    lines.append("```json")
+    lines.append(_dump(list(sys.argv)))
+    lines.append("```")
+    if reason:
+        lines.append(f"- reason: `{str(reason)}`")
+    lines.append("")
+    lines.append("## Key frames (frame_id)")
+    for k in ["press_end", "slide_mid", "hold_end"]:
+        lines.append(f"- {k}: `{key_frames.get(k)}`")
+    lines.append("")
+    lines.append("## Resolved (for diff/audit)")
+    for section in ["friction", "scale", "indenter", "conventions", "render", "export", "contact"]:
+        if section in resolved_dict:
+            lines.append(f"### {section}")
+            lines.append("```json")
+            lines.append(_dump(resolved_dict.get(section)))
+            lines.append("```")
+            lines.append("")
+    lines.append("## Conclusion")
+    lines.append("- (fill in) What changed, what improved, what to try next.")
+    lines.append("")
+    lines.append("## Repro / analysis")
+    lines.append(f"- Run intermediate analysis: `python example/analyze_rgb_compare_intermediate.py --save-dir {save_dir}`")
+    lines.append("")
+
+    try:
+        notes_path.write_text("\n".join(lines), encoding="utf-8")
+    except Exception as e:
+        print(f"Warning: failed to write tuning_notes.md: {e}")
+
+
 def _write_preflight_run_manifest(
     save_dir: Path,
     record_interval: int,
@@ -640,7 +764,7 @@ def _write_preflight_run_manifest(
     manifest: Dict[str, object] = {
         "created_at": datetime.datetime.now().astimezone().isoformat(),
         "argv": list(sys.argv),
-        "run_context": dict(run_context),
+        "run_context": _sanitize_run_context_for_manifest(run_context),
         "scene_params": dict(SCENE_PARAMS),
         "deps": {
             "has_taichi": bool(HAS_TAICHI),
@@ -689,6 +813,19 @@ def _write_preflight_run_manifest(
         )
     except Exception as e:
         print(f"Warning: failed to write preflight run manifest: {e}")
+        return
+
+    try:
+        _write_tuning_notes(
+            save_dir,
+            record_interval=int(record_interval),
+            total_frames=int(total_frames),
+            run_context=manifest.get("run_context") if isinstance(manifest, dict) else {},
+            overwrite=False,
+            reason=reason,
+        )
+    except Exception as e:
+        print(f"Warning: failed to write tuning notes: {e}")
 
 
 # ==============================================================================
@@ -2187,7 +2324,7 @@ class RGBComparisonEngine:
         manifest = {
             "created_at": datetime.datetime.now().astimezone().isoformat(),
             "argv": list(sys.argv),
-            "run_context": dict(self.run_context),
+            "run_context": _sanitize_run_context_for_manifest(self.run_context),
             "scene_params": dict(SCENE_PARAMS),
             "deps": {
                 "has_taichi": bool(HAS_TAICHI),
@@ -2232,6 +2369,19 @@ class RGBComparisonEngine:
             )
         except Exception as e:
             print(f"Warning: failed to write run manifest: {e}")
+            return
+
+        try:
+            _write_tuning_notes(
+                self.save_dir,
+                record_interval=int(record_interval),
+                total_frames=int(total_frames),
+                run_context=manifest.get("run_context") if isinstance(manifest, dict) else {},
+                overwrite=False,
+                reason="runtime",
+            )
+        except Exception as e:
+            print(f"Warning: failed to write tuning notes (runtime): {e}")
 
     def _write_metrics_files(self) -> None:
         if not self.save_dir or not self._metrics_rows:
