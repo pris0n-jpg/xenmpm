@@ -158,6 +158,11 @@ SCENE_PARAMS = {
     # 从而出现非物理的“整块发黑/暗盘”。该开关会把 height_field 限制在“不低于压头表面”。
     'mpm_height_clamp_indenter': True,
 
+    # Render conventions (MPM -> RGB)
+    # NOTE: 为了与 FEM(SensorScene) 的最终输出保持“同帧同侧”，这里默认不在 field 层额外做 X 翻转。
+    # 若需要复现旧输出（legacy），可用 CLI 显式打开。
+    'mpm_render_flip_x': False,
+
     # Trajectory parameters
     # NOTE: 默认压深建议保持在 FEM 数据覆盖范围内（通常 <= 1mm），否则 MPM 侧容易出现“广域下陷”
     # 进而放大渲染伪影（暗块/halo），导致 MPM vs FEM 观感不可直接对比。
@@ -1557,9 +1562,10 @@ class MPMSensorScene(Scene):
         self._uv_disp_mm: Optional[np.ndarray] = None
         self._cached_warped_tex: Optional[np.ndarray] = None  # Cache to avoid double remap per frame
         self._depth_tint_enabled = True
-        # NOTE: SensorScene 的 texcoords u_range=(1,0), v_range=(1,0)；MPM 侧跟随此约定。
+        # NOTE: SensorScene.depth_mesh texcoords: u_range=(0,1), v_range=(1,0)；MPM 侧跟随此约定。
         self._warp_flip_x = True
         self._warp_flip_y = True
+        self._render_flip_x = bool(SCENE_PARAMS.get("mpm_render_flip_x", False))
 
         # Surface mesh
         self.surf_mesh = GLSurfMeshItem(
@@ -1673,9 +1679,9 @@ class MPMSensorScene(Scene):
         if uv_disp_mm is None:
             self._uv_disp_mm = None
         else:
-            # CRITICAL: Apply same horizontal flip as height_field to match mesh x_range convention
-            # height_field is flipped with [:, ::-1], so UV must be too
-            uv_flipped = _mpm_flip_x_field(uv_disp_mm).copy()
+            # Legacy option: apply horizontal flip for render alignment (see --mpm-render-flip-x).
+            # When enabled, keep UV consistent with height_field flip.
+            uv_flipped = _mpm_flip_x_field(uv_disp_mm).copy() if self._render_flip_x else uv_disp_mm
             # NOTE: u 分量的“方向反转”由 warp 的 flip_x 统一处理，避免同一轴被多处重复修正。
             self._uv_disp_mm = uv_flipped.astype(np.float32, copy=False)
         # 在 warp 模式下，每帧都需要更新纹理
@@ -1777,10 +1783,10 @@ class MPMSensorScene(Scene):
             if iters > 0:
                 height_field_mm = self._box_blur_2d(height_field_mm, iterations=iters)
 
-        # CRITICAL: Flip horizontally to match mesh x_range convention
+        # Legacy option: flip horizontally for render alignment (see --mpm-render-flip-x).
         # Height field: col=0 is x=-gel_w/2 (left)
         # Mesh x_range: (gel_w/2, -gel_w/2) means col=0 is x=+gel_w/2 (right)
-        height_field_mm = _mpm_flip_x_field(height_field_mm)
+        height_field_mm = _mpm_flip_x_field(height_field_mm) if self._render_flip_x else height_field_mm
 
         # Ensure negative values for indentation (SensorScene convention)
         depth = np.minimum(height_field_mm, 0)
@@ -1828,7 +1834,7 @@ class MPMSensorScene(Scene):
             cell_w = self.gel_width_mm / self.n_col
             cell_h = self.gel_height_mm / self.n_row
             # Keep overlay consistent with MPM render flip convention (see _mpm_flip_x_field).
-            x_mm = _mpm_flip_x_mm(x_mm)
+            x_mm = _mpm_flip_x_mm(x_mm) if self._render_flip_x else x_mm
             col = int((x_mm + self.gel_width_mm / 2.0) / cell_w)
             row = int(y_mm / cell_h)
             col = int(np.clip(col, 0, self.n_col - 1))
@@ -2960,6 +2966,11 @@ def main():
         help='MPM depth tint overlay on marker texture: on|off'
     )
     parser.add_argument(
+        '--mpm-render-flip-x', type=str, choices=['on', 'off'], default='off',
+        help=('MPM render horizontal flip for height_field/uv/overlay: on|off '
+              '(off aligns with FEM baseline; on reproduces legacy output)')
+    )
+    parser.add_argument(
         '--mpm-height-fill-holes', type=str, choices=['on', 'off'], default='on',
         help='MPM height_field hole filling (diffusion) before rendering: on|off'
     )
@@ -3101,6 +3112,7 @@ def main():
     SCENE_PARAMS["mpm_height_clamp_indenter"] = (str(args.mpm_height_clamp_indenter).lower().strip() != "off")
     SCENE_PARAMS["mpm_height_clip_outliers"] = (str(args.mpm_height_clip_outliers).lower().strip() == "on")
     SCENE_PARAMS["mpm_height_clip_outliers_min_mm"] = float(args.mpm_height_clip_outliers_min_mm)
+    SCENE_PARAMS["mpm_render_flip_x"] = (str(args.mpm_render_flip_x).lower().strip() == "on")
 
     if args.fric is not None:
         fric = float(args.fric)
@@ -3144,6 +3156,7 @@ def main():
     print(f"Press depth: {args.press_mm} mm")
     print(f"Slide distance: {args.slide_mm} mm")
     print(f"MPM indenter type: {args.indenter_type}")
+    print(f"MPM render flip_x: {'on' if bool(SCENE_PARAMS.get('mpm_render_flip_x', False)) else 'off'}")
     fem_fric = float(SCENE_PARAMS.get("fem_fric_coef", 0.4))
     mpm_mu_s = float(SCENE_PARAMS.get("mpm_mu_s", 2.0))
     mpm_mu_k = float(SCENE_PARAMS.get("mpm_mu_k", 1.5))
@@ -3317,12 +3330,12 @@ def main():
                 },
             },
             "conventions": {
-                "mpm_height_field_flip_x": True,
-                "mpm_uv_disp_flip_x": True,
+                "mpm_height_field_flip_x": bool(SCENE_PARAMS.get("mpm_render_flip_x", False)),
+                "mpm_uv_disp_flip_x": bool(SCENE_PARAMS.get("mpm_render_flip_x", False)),
                 "mpm_uv_disp_u_negate": False,
                 "mpm_warp_flip_x": True,
                 "mpm_warp_flip_y": True,
-                "mpm_overlay_flip_x_mm": True,
+                "mpm_overlay_flip_x_mm": bool(SCENE_PARAMS.get("mpm_render_flip_x", False)),
                 "mpm_height_fill_holes": bool(SCENE_PARAMS.get("mpm_height_fill_holes", False)),
                 "mpm_height_fill_holes_iters": int(SCENE_PARAMS.get("mpm_height_fill_holes_iters", 0)),
                 "mpm_height_smooth": bool(SCENE_PARAMS.get("mpm_height_smooth", True)),

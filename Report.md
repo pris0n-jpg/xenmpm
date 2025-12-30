@@ -344,14 +344,14 @@ FEM 的最终 RGB 来自 `SensorScene.vis_depth_mesh`（depth 渲染模式下先
 MPM 的最终 RGB 由 `MPMSensorScene` 直接渲染 `surf_mesh`：
 
 - **mesh 坐标范围**：`x_range=(gel_w/2, -gel_w/2)`，`y_range=(gel_h,0)`（`example/mpm_fem_rgb_compare.py:1501`、`example/mpm_fem_rgb_compare.py:1567`）。
-- **height_field flip（硬编码）**：`set_height_field()` 内固定执行 `_mpm_flip_x_field(height_field_mm)`（`example/mpm_fem_rgb_compare.py:1773`、`example/mpm_fem_rgb_compare.py:1783`、`example/mpm_fem_rgb_compare.py:563`）。
-- **uv_disp flip（硬编码）**：`set_uv_displacement()` 内固定执行 `_mpm_flip_x_field(uv_disp_mm)`（`example/mpm_fem_rgb_compare.py:1671`、`example/mpm_fem_rgb_compare.py:1678`）。
+- **height_field flip（可开关）**：由 `--mpm-render-flip-x on|off` 控制；默认 `off`（对齐 FEM，修复同帧左右镜像），开启则复现旧行为（legacy）（`example/mpm_fem_rgb_compare.py:1773`、`example/mpm_fem_rgb_compare.py:1783`、`example/mpm_fem_rgb_compare.py:563`）。
+- **uv_disp flip（可开关）**：同样由 `--mpm-render-flip-x` 控制（`example/mpm_fem_rgb_compare.py:1671`、`example/mpm_fem_rgb_compare.py:1684`）。
 - **marker warp 的额外 flip**：
   - `warp_marker_texture(... flip_x, flip_y)` 在 mm→px 后对 `dx_px/dy_px` 做符号修正（`example/mpm_fem_rgb_compare.py:465`、`example/mpm_fem_rgb_compare.py:501`）。
   - `MPMSensorScene` 默认 `self._warp_flip_x=True`、`self._warp_flip_y=True`（`example/mpm_fem_rgb_compare.py:1561`）。
-- **indenter overlay 的 x_mm 修正**：绘制 overlay 前对 `x_mm` 调用 `_mpm_flip_x_mm`（`example/mpm_fem_rgb_compare.py:1830`）。
+- **indenter overlay 的 x_mm 修正（可开关）**：随 `--mpm-render-flip-x` 同步（`example/mpm_fem_rgb_compare.py:1830`）。
 
-补充：`run_manifest.json.resolved.conventions` 会记录 `mpm_height_field_flip_x/mpm_uv_disp_flip_x/mpm_warp_flip_x/mpm_warp_flip_y/mpm_overlay_flip_x_mm` 等字段（见 `output/rgb_compare/baseline/run_manifest.json:1`），但当前实现里上述 flip 多数是硬编码路径，并非真正由开关驱动；因此“manifest 记录为 True”并不等价于“可随参数关闭”，这也是后续需要收敛的点。
+补充：`run_manifest.json.resolved.conventions` 会记录 `mpm_height_field_flip_x/mpm_uv_disp_flip_x/mpm_warp_flip_x/mpm_warp_flip_y/mpm_overlay_flip_x_mm` 等字段（见 `output/rgb_compare/baseline/run_manifest.json:1`）。目前 `height/uv/overlay` 的 flip_x 已由 `--mpm-render-flip-x` 驱动并可审计；`warp flip_x/flip_y` 仍为内部固定约定（见后续 marker 收敛项）。
 
 ### 11.4 X 方向“重复翻转”风险点清单（按发生层归类）
 
