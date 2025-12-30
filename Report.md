@@ -277,6 +277,14 @@ python example/mpm_fem_rgb_compare.py --mode raw --object-file xengym/assets/obj
 
 结论：MPM 的主要接触区域位置 **非常接近 FEM 的水平镜像**（不是小 offset/缩放误差），优先级最高应按 “X 轴翻转/坐标约定不一致” 排查。
 
+补充（离线对齐证据，直接服务于“多翻/少翻”定位与后续收敛）：
+
+- 使用 `example/analyze_rgb_compare_flip_alignment.py` 在 `output/rgb_compare/baseline` 上对 frame 75/80/85 计算得到：
+  - `mpm_vs_fem=mirror`（3/3）
+  - `uv_best=flip`（3/3；例如 frame 75：`mpm_cx≈71.17px`，`uv_delta(flip)≈4.32px`）
+
+该结果说明：当前 baseline 下 MPM 的渲染结果与 FEM 更接近“水平镜像”关系；同时 UV 强信号区在像素坐标下更符合“需要水平翻转映射”的假设，属于优先级最高的坐标/翻转一致性问题（见第 11 节）。
+
 ### 10.3 轨迹证据：仿真里 slide 是 +x（+3mm），但渲染里方向与 FEM 不一致
 
 证据来自 `run_manifest.json` 的 `trajectory`：
