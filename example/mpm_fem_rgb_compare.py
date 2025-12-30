@@ -162,6 +162,10 @@ SCENE_PARAMS = {
     # NOTE: 为了与 FEM(SensorScene) 的最终输出保持“同帧同侧”，这里默认不在 field 层额外做 X 翻转。
     # 若需要复现旧输出（legacy），可用 CLI 显式打开。
     'mpm_render_flip_x': False,
+    # Marker warp convention: flip dx/dy in texture space to match mesh/texcoords.
+    # NOTE: 默认让 marker 位移方向与 UV 场一致（不额外翻 X）。
+    'mpm_warp_flip_x': False,
+    'mpm_warp_flip_y': True,
 
     # Trajectory parameters
     # NOTE: 默认压深建议保持在 FEM 数据覆盖范围内（通常 <= 1mm），否则 MPM 侧容易出现“广域下陷”
@@ -1563,8 +1567,8 @@ class MPMSensorScene(Scene):
         self._cached_warped_tex: Optional[np.ndarray] = None  # Cache to avoid double remap per frame
         self._depth_tint_enabled = True
         # NOTE: SensorScene.depth_mesh texcoords: u_range=(0,1), v_range=(1,0)；MPM 侧跟随此约定。
-        self._warp_flip_x = True
-        self._warp_flip_y = True
+        self._warp_flip_x = bool(SCENE_PARAMS.get("mpm_warp_flip_x", False))
+        self._warp_flip_y = bool(SCENE_PARAMS.get("mpm_warp_flip_y", True))
         self._render_flip_x = bool(SCENE_PARAMS.get("mpm_render_flip_x", False))
 
         # Surface mesh
@@ -2971,6 +2975,14 @@ def main():
               '(off aligns with FEM baseline; on reproduces legacy output)')
     )
     parser.add_argument(
+        '--mpm-warp-flip-x', type=str, choices=['on', 'off'], default=None,
+        help='Marker warp: flip dx in texture space (default: auto, follows --mpm-render-flip-x)'
+    )
+    parser.add_argument(
+        '--mpm-warp-flip-y', type=str, choices=['on', 'off'], default=None,
+        help='Marker warp: flip dy in texture space (default: on)'
+    )
+    parser.add_argument(
         '--mpm-height-fill-holes', type=str, choices=['on', 'off'], default='on',
         help='MPM height_field hole filling (diffusion) before rendering: on|off'
     )
@@ -3113,6 +3125,14 @@ def main():
     SCENE_PARAMS["mpm_height_clip_outliers"] = (str(args.mpm_height_clip_outliers).lower().strip() == "on")
     SCENE_PARAMS["mpm_height_clip_outliers_min_mm"] = float(args.mpm_height_clip_outliers_min_mm)
     SCENE_PARAMS["mpm_render_flip_x"] = (str(args.mpm_render_flip_x).lower().strip() == "on")
+    if args.mpm_warp_flip_x is None:
+        SCENE_PARAMS["mpm_warp_flip_x"] = bool(SCENE_PARAMS.get("mpm_render_flip_x", False))
+    else:
+        SCENE_PARAMS["mpm_warp_flip_x"] = (str(args.mpm_warp_flip_x).lower().strip() == "on")
+    if args.mpm_warp_flip_y is None:
+        SCENE_PARAMS["mpm_warp_flip_y"] = True
+    else:
+        SCENE_PARAMS["mpm_warp_flip_y"] = (str(args.mpm_warp_flip_y).lower().strip() == "on")
 
     if args.fric is not None:
         fric = float(args.fric)
@@ -3157,6 +3177,11 @@ def main():
     print(f"Slide distance: {args.slide_mm} mm")
     print(f"MPM indenter type: {args.indenter_type}")
     print(f"MPM render flip_x: {'on' if bool(SCENE_PARAMS.get('mpm_render_flip_x', False)) else 'off'}")
+    print(
+        "MPM marker warp flip: "
+        f"x={'on' if bool(SCENE_PARAMS.get('mpm_warp_flip_x', False)) else 'off'}, "
+        f"y={'on' if bool(SCENE_PARAMS.get('mpm_warp_flip_y', True)) else 'off'}"
+    )
     fem_fric = float(SCENE_PARAMS.get("fem_fric_coef", 0.4))
     mpm_mu_s = float(SCENE_PARAMS.get("mpm_mu_s", 2.0))
     mpm_mu_k = float(SCENE_PARAMS.get("mpm_mu_k", 1.5))
@@ -3333,8 +3358,8 @@ def main():
                 "mpm_height_field_flip_x": bool(SCENE_PARAMS.get("mpm_render_flip_x", False)),
                 "mpm_uv_disp_flip_x": bool(SCENE_PARAMS.get("mpm_render_flip_x", False)),
                 "mpm_uv_disp_u_negate": False,
-                "mpm_warp_flip_x": True,
-                "mpm_warp_flip_y": True,
+                "mpm_warp_flip_x": bool(SCENE_PARAMS.get("mpm_warp_flip_x", False)),
+                "mpm_warp_flip_y": bool(SCENE_PARAMS.get("mpm_warp_flip_y", True)),
                 "mpm_overlay_flip_x_mm": bool(SCENE_PARAMS.get("mpm_render_flip_x", False)),
                 "mpm_height_fill_holes": bool(SCENE_PARAMS.get("mpm_height_fill_holes", False)),
                 "mpm_height_fill_holes_iters": int(SCENE_PARAMS.get("mpm_height_fill_holes_iters", 0)),

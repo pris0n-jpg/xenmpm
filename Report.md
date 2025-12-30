@@ -343,30 +343,31 @@ FEM 的最终 RGB 来自 `SensorScene.vis_depth_mesh`（depth 渲染模式下先
 
 MPM 的最终 RGB 由 `MPMSensorScene` 直接渲染 `surf_mesh`：
 
-- **mesh 坐标范围**：`x_range=(gel_w/2, -gel_w/2)`，`y_range=(gel_h,0)`（`example/mpm_fem_rgb_compare.py:1501`、`example/mpm_fem_rgb_compare.py:1567`）。
-- **height_field flip（可开关）**：由 `--mpm-render-flip-x on|off` 控制；默认 `off`（对齐 FEM，修复同帧左右镜像），开启则复现旧行为（legacy）（`example/mpm_fem_rgb_compare.py:1773`、`example/mpm_fem_rgb_compare.py:1783`、`example/mpm_fem_rgb_compare.py:563`）。
-- **uv_disp flip（可开关）**：同样由 `--mpm-render-flip-x` 控制（`example/mpm_fem_rgb_compare.py:1671`、`example/mpm_fem_rgb_compare.py:1684`）。
+- **mesh 坐标范围**：`x_range=(gel_w/2, -gel_w/2)`，`y_range=(gel_h,0)`（`example/mpm_fem_rgb_compare.py:1575`、`example/mpm_fem_rgb_compare.py:1577`）。
+- **height_field flip（可开关）**：由 `--mpm-render-flip-x on|off` 控制；默认 `off`（对齐 FEM，修复同帧左右镜像），开启则复现旧行为（legacy）（`example/mpm_fem_rgb_compare.py:2973`、`example/mpm_fem_rgb_compare.py:1793`、`example/mpm_fem_rgb_compare.py:570`）。
+- **uv_disp flip（可开关）**：同样由 `--mpm-render-flip-x` 控制（`example/mpm_fem_rgb_compare.py:1688`、`example/mpm_fem_rgb_compare.py:570`）。
 - **marker warp 的额外 flip**：
-  - `warp_marker_texture(... flip_x, flip_y)` 在 mm→px 后对 `dx_px/dy_px` 做符号修正（`example/mpm_fem_rgb_compare.py:465`、`example/mpm_fem_rgb_compare.py:501`）。
-  - `MPMSensorScene` 默认 `self._warp_flip_x=True`、`self._warp_flip_y=True`（`example/mpm_fem_rgb_compare.py:1561`）。
-- **indenter overlay 的 x_mm 修正（可开关）**：随 `--mpm-render-flip-x` 同步（`example/mpm_fem_rgb_compare.py:1830`）。
+  - `warp_marker_texture(... flip_x, flip_y)` 在 mm→px 后对 `dx_px/dy_px` 做符号修正（`example/mpm_fem_rgb_compare.py:474`、`example/mpm_fem_rgb_compare.py:527`）。
+  - `--mpm-warp-flip-x/--mpm-warp-flip-y` 控制其取值：默认 `flip_x` **跟随** `--mpm-render-flip-x`（auto，避免“翻两次”），`flip_y` 默认 `on`（把 v=+y 向上映射到图像 y=+ 向下）。
+  - `MPMSensorScene` 从 `SCENE_PARAMS["mpm_warp_flip_x/y"]` 读取实际生效值（`example/mpm_fem_rgb_compare.py:1570`）。
+- **indenter overlay 的 x_mm 修正（可开关）**：随 `--mpm-render-flip-x` 同步（`example/mpm_fem_rgb_compare.py:1841`）。
 
-补充：`run_manifest.json.resolved.conventions` 会记录 `mpm_height_field_flip_x/mpm_uv_disp_flip_x/mpm_warp_flip_x/mpm_warp_flip_y/mpm_overlay_flip_x_mm` 等字段（见 `output/rgb_compare/baseline/run_manifest.json:1`）。目前 `height/uv/overlay` 的 flip_x 已由 `--mpm-render-flip-x` 驱动并可审计；`warp flip_x/flip_y` 仍为内部固定约定（见后续 marker 收敛项）。
+补充：`run_manifest.json.run_context.resolved.conventions` 会记录 `mpm_height_field_flip_x/mpm_uv_disp_flip_x/mpm_warp_flip_x/mpm_warp_flip_y/mpm_overlay_flip_x_mm` 等字段（见 `output/rgb_compare/baseline/run_manifest.json:1`）。目前 `height/uv/overlay` 的 flip_x 由 `--mpm-render-flip-x` 驱动并可审计；`warp flip_x/flip_y` 也可通过 CLI 显式控制并落盘（便于追责与复现）。
 
 ### 11.4 X 方向“重复翻转”风险点清单（按发生层归类）
 
 同一根 X 轴目前至少可能被以下环节重复修正：
 
 1) **mesh 层**：`x_range=(gel_w/2, -gel_w/2)`（FEM/MPM 都存在）
-2) **field 层**：`_mpm_flip_x_field(height_field_mm)`（`example/mpm_fem_rgb_compare.py:1783`）
-3) **uv 层**：`_mpm_flip_x_field(uv_disp_mm)`（`example/mpm_fem_rgb_compare.py:1678`）
-4) **warp 层**：`warp_marker_texture(... flip_x=True)` 对 `dx_px` 取负（`example/mpm_fem_rgb_compare.py:501`）
-5) **overlay 层**：`_mpm_flip_x_mm` 对标量坐标取负（`example/mpm_fem_rgb_compare.py:1830`）
+2) **field 层**：`_mpm_flip_x_field(height_field_mm)`（`example/mpm_fem_rgb_compare.py:1793`）
+3) **uv 层**：`_mpm_flip_x_field(uv_disp_mm)`（`example/mpm_fem_rgb_compare.py:1688`）
+4) **warp 层**：`warp_marker_texture(... flip_x=...)` 对 `dx_px` 取负（由 `--mpm-warp-flip-x` 控制；`example/mpm_fem_rgb_compare.py:527`）
+5) **overlay 层**：`_mpm_flip_x_mm` 对标量坐标取负（`example/mpm_fem_rgb_compare.py:1841`）
 
 一旦其中某一层与 FEM 的约定不同（或者 MPM 内部出现“多翻/少翻”），就会出现你看到的：同帧接触圈左右镜像、marker 位移方向反/抵消、边缘点异常拉丝等问题。
 
 ### 11.5 收敛原则（供后续修复使用）
 
 - **原则 1：单一真相源**：X 方向翻转只允许在一个层面发生一次（建议优先以 mesh 层的 `x_range/texcoords` 为真相源），其它层面不得再对同一轴做“补救式修正”。
-- **原则 2：可审计**：最终生效的翻转约定必须写入 `run_manifest.json.resolved.conventions`，并在 `tuning_notes.md` 留痕。
+- **原则 2：可审计**：最终生效的翻转约定必须写入 `run_manifest.json.run_context.resolved.conventions`，并在 `tuning_notes.md` 留痕。
 - **原则 3：先对齐方向再调伪影**：先解决“同帧同侧”（press-only/sliding 方向一致），再处理高度场 outlier/holes/smooth，避免两类变量耦合导致误归因。
