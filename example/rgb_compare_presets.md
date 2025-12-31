@@ -4,8 +4,14 @@
 
 ## 运行模式说明
 
+- 不带 `--save-dir` 时默认进入交互 UI（interactive）。  
 - 当提供 `--save-dir` 时，脚本默认以 **headless batch** 模式运行并退出（不进入 UI）。  
-- 如需交互预览，额外加 `--interactive`。
+- 如需边预览边落盘，额外加 `--interactive`。
+
+## 默认值（容易误解）
+
+- `--mpm-marker` 默认 `warp`（点阵会参与面内位移 warp，因此会随滑移变形）。  
+- `--fem-marker` 默认 `on`；若只想看形变/光照，可用 `--fem-marker off --mpm-marker off`。
 
 ## 预设 1：press-only（只压入不滑移）
 

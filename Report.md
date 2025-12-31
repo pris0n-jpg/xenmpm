@@ -219,7 +219,7 @@ python example/mpm_fem_rgb_compare.py --mode raw --object-file xengym/assets/obj
 
 按以下顺序能最快把问题归因到“参数/尺度/高度场/marker”中的某一类：
 
-1) **锁定基线命令**：使用 `--save-dir` 固化输出与 `run_manifest.json`，避免“你以为参数一致但实际不一致”。
+1) **锁定基线命令**：使用 `--save-dir` 固化输出与 `run_manifest.json`，避免“你以为参数一致但实际不一致”（推荐命令见 `example/rgb_compare_presets.md`）。
 2) **先对齐摩擦**：`--fric 0.4`，确认启动日志 `aligned=true`。
 3) **先去掉非物理叠色**：`--mpm-depth-tint off`，只看形变+光照是否仍有暗盘。
 4) **收敛高度场伪影**：保持 `--mpm-height-clamp-indenter on`；逐步调 `fill_holes/smooth`。
