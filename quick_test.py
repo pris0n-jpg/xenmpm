@@ -362,6 +362,44 @@ def main() -> int:
         if render.get("mpm_depth_tint") is not False:
             return _fail(f"Unexpected render.mpm_depth_tint: {render}")
 
+    # 8) Offline mirror/flip sentinel fixture (no simulation, numpy+PIL only).
+    fixture_dir = repo_root / "example" / "testdata" / "mirror_sentinel_noflip"
+    sentinel_script = repo_root / "example" / "analyze_rgb_compare_flip_alignment.py"
+    if not fixture_dir.exists() or not sentinel_script.exists():
+        return _fail("mirror sentinel fixture missing (need example/testdata/mirror_sentinel_noflip)")
+
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        out_csv = Path(tmp_dir_str) / "alignment_flip.csv"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(sentinel_script),
+                "--save-dir",
+                str(fixture_dir),
+                "--sample",
+                "5",
+                "--require-mpm-vs-fem",
+                "direct",
+                "--require-uv-best",
+                "noflip",
+                "--min-pass-ratio",
+                "0.8",
+                "--min-known-frames",
+                "2",
+                "--out",
+                str(out_csv),
+            ],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            if proc.stdout:
+                print(proc.stdout, flush=True)
+            if proc.stderr:
+                print(proc.stderr, file=sys.stderr, flush=True)
+            return _fail("mirror sentinel fixture failed (see output above)")
+
     print("OK: quick_test", flush=True)
     return 0
 

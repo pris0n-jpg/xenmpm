@@ -1,0 +1,33 @@
+{
+  "created_at": "fixture",
+  "argv": [
+    "fixture"
+  ],
+  "run_context": {
+    "resolved": {
+      "conventions": {
+        "mpm_render_flip_x": false
+      }
+    }
+  },
+  "scene_params": {
+    "gel_size_mm": [
+      17.3,
+      29.15
+    ],
+    "height_grid_shape": [
+      20,
+      10
+    ]
+  },
+  "deps": {},
+  "trajectory": {
+    "total_frames": 3,
+    "frame_to_phase": [
+      "press",
+      "slide",
+      "hold"
+    ]
+  },
+  "outputs": {}
+}

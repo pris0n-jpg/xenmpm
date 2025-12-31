@@ -151,6 +151,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--contact-thr-mm", type=float, default=-0.01, help="Contact threshold for height_field_mm (mm).")
     parser.add_argument("--uv-percentile", type=float, default=95.0, help="Percentile for selecting high-magnitude uv_disp_mm region.")
     parser.add_argument("--out", type=str, default=None, help="Output CSV path (default: <save-dir>/alignment_flip.csv)")
+    parser.add_argument(
+        "--require-mpm-vs-fem",
+        type=str,
+        choices=["direct", "mirror"],
+        default=None,
+        help="If set, fail when the majority of sampled frames disagree on whether MPM motion matches FEM directly or via horizontal mirror.",
+    )
+    parser.add_argument(
+        "--require-uv-best",
+        type=str,
+        choices=["noflip", "flip"],
+        default=None,
+        help="If set, fail when the majority of sampled frames disagree on whether uv_disp grid X should be treated as flipped to match rendered MPM motion.",
+    )
+    parser.add_argument(
+        "--min-pass-ratio",
+        type=float,
+        default=0.8,
+        help="Minimum ratio of agreeing frames for --require-* checks (default: 0.8).",
+    )
+    parser.add_argument(
+        "--min-known-frames",
+        type=int,
+        default=2,
+        help="Minimum number of frames with a determinate signal for --require-* checks (default: 2).",
+    )
     args = parser.parse_args(argv)
 
     save_dir = Path(args.save_dir)
@@ -329,6 +355,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"uv_delta={_fmt(r.uv_delta_noflip_px)}/{_fmt(r.uv_delta_flip_px)}",
             flush=True,
         )
+
+    def _known_values(value: str, *, known: Sequence[str]) -> bool:
+        return value in set(known)
+
+    def _validate_majority(*, name: str, values: Sequence[str], expected: str, known: Sequence[str]) -> int:
+        picked = [v for v in values if _known_values(v, known=known)]
+        if len(picked) < int(args.min_known_frames):
+            return _fail(
+                f"{name}: insufficient signal (known={len(picked)} < min_known_frames={args.min_known_frames}); "
+                f"try specifying --frames to include slide/strong-contact frames"
+            )
+        ok = sum(1 for v in picked if v == expected)
+        ratio = float(ok) / float(len(picked)) if picked else 0.0
+        if ratio < float(args.min_pass_ratio):
+            return _fail(
+                f"{name}: expected={expected} ok={ok}/{len(picked)} ratio={ratio:.3f} < min_pass_ratio={float(args.min_pass_ratio):.3f}; "
+                "this usually indicates an extra/missing horizontal flip. "
+                "Check: --mpm-render-flip-x / --mpm-warp-flip-x / --mpm-warp-flip-y and run_manifest.json resolved.conventions."
+            )
+        return 0
+
+    if args.require_mpm_vs_fem:
+        rc = _validate_majority(
+            name="mpm_vs_fem",
+            values=[r.mpm_vs_fem for r in rows_out],
+            expected=str(args.require_mpm_vs_fem),
+            known=["direct", "mirror"],
+        )
+        if rc != 0:
+            return rc
+
+    if args.require_uv_best:
+        rc = _validate_majority(
+            name="uv_best",
+            values=[r.uv_best for r in rows_out],
+            expected=str(args.require_uv_best),
+            known=["noflip", "flip"],
+        )
+        if rc != 0:
+            return rc
+
     return 0
 
 
