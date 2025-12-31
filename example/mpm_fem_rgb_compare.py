@@ -153,7 +153,7 @@ SCENE_PARAMS = {
     # NOTE: 仅作为“最后一道防线”，避免 footprint 外的异常深值把整块区域渲染成暗盘/彩虹 halo。
     # 默认关闭以保持基线行为不变；建议与 fill_holes 联用。
     'mpm_height_clip_outliers': False,
-    'mpm_height_clip_outliers_min_mm': 5.0,  # 超过该负向深度（mm）的值会被视作离群并置为 NaN
+    'mpm_height_clip_outliers_min_mm': 2.0,  # 超过该负向深度（mm）的值会被视作离群并置为 NaN
     # IMPORTANT: MPM 接触采用 penalty 形式时，压头可能“穿透”粒子表面并导致高度场过深，
     # 从而出现非物理的“整块发黑/暗盘”。该开关会把 height_field 限制在“不低于压头表面”。
     'mpm_height_clamp_indenter': True,
@@ -3011,8 +3011,8 @@ def main():
         help='Clip extreme negative MPM height_field outside indenter footprint: on|off'
     )
     parser.add_argument(
-        '--mpm-height-clip-outliers-min-mm', type=float, default=float(SCENE_PARAMS.get("mpm_height_clip_outliers_min_mm", 5.0)),
-        help='Negative depth threshold in mm for --mpm-height-clip-outliers (default: 5.0)'
+        '--mpm-height-clip-outliers-min-mm', type=float, default=float(SCENE_PARAMS.get("mpm_height_clip_outliers_min_mm", 2.0)),
+        help='Negative depth threshold in mm for --mpm-height-clip-outliers (default: 2.0)'
     )
     parser.add_argument(
         '--mpm-show-indenter', action='store_true', default=False,

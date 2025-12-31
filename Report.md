@@ -140,9 +140,9 @@ python example/mpm_fem_rgb_compare.py --mode raw --object-file xengym/assets/obj
 
 现有可调手段（脚本已提供 CLI）：
 
-- hole filling：`--mpm-height-fill-holes on|off` + `--mpm-height-fill-holes-iters`（`example/mpm_fem_rgb_compare.py:2963`）
-- smoothing：`--mpm-height-smooth on|off` + `--mpm-height-smooth-iters`（`example/mpm_fem_rgb_compare.py:2971`）
-- outlier clip（最后一道防线，默认关闭）：`--mpm-height-clip-outliers on|off` + `--mpm-height-clip-outliers-min-mm`（`example/mpm_fem_rgb_compare.py:2987`）
+- hole filling：`--mpm-height-fill-holes on|off` + `--mpm-height-fill-holes-iters`（`example/mpm_fem_rgb_compare.py:2986`）
+- smoothing：`--mpm-height-smooth on|off` + `--mpm-height-smooth-iters`（`example/mpm_fem_rgb_compare.py:2994`）
+- outlier clip（最后一道防线，默认关闭）：`--mpm-height-clip-outliers on|off` + `--mpm-height-clip-outliers-min-mm`（`example/mpm_fem_rgb_compare.py:3010`）
 
 建议的调参顺序（KISS 优先）：
 
@@ -223,7 +223,7 @@ python example/mpm_fem_rgb_compare.py --mode raw --object-file xengym/assets/obj
 2) **先对齐摩擦**：`--fric 0.4`，确认启动日志 `aligned=true`。
 3) **先去掉非物理叠色**：`--mpm-depth-tint off`，只看形变+光照是否仍有暗盘。
 4) **收敛高度场伪影**：保持 `--mpm-height-clamp-indenter on`；逐步调 `fill_holes/smooth`。
-   - 若确认 footprint 外出现极端负值：开启 `--mpm-height-clip-outliers on --mpm-height-clip-outliers-min-mm 5.0` 作为最后防线。
+   - 若确认 footprint 外出现极端负值：开启 `--mpm-height-clip-outliers on --mpm-height-clip-outliers-min-mm 2.0`（默认 2.0）作为最后防线。
 5) **再看 marker 语义**：切 `--mpm-marker warp`，再用 `--mpm-debug-overlay uv|warp` 判断“方向/尺度/边界”问题来自哪里。
 6) **最后再讨论物理差异**：在上述非力学因素都收敛后，再看 MPM vs FEM 是否仍存在系统性差异。
 
