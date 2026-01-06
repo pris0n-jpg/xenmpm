@@ -83,3 +83,16 @@ python example/analyze_rgb_compare_uv_disp_contact.py --save-dir output/rgb_comp
 - `analysis_latest.csv`：对抽样帧的高度场/位移场统计与现象标签（halo_risk/edge_streak_risk 等）。
 - `alignment_flip_latest.csv`：对关键帧的 direct vs mirror 与 uv_grid flip 判定，用于快速确认“坐标/翻转”一致性。
 - `uv_disp_contact_stats.csv` / `uv_disp_contact_diagnostics.md`：对关键帧接触区的 `uv_disp_mm` 做 coverage/分位数/尖峰位置统计，用于解释“多数不动 + 少量抽风”。
+
+## 离线：height_clip_outliers 对 halo 的量化影响
+
+当环境无法运行 taichi/ezgl 渲染链路时，仍可基于已保存的 `intermediate/frame_XXXX.npz` 离线模拟 `mpm_height_clip_outliers` 的裁剪效果，并量化 halo_risk 相关统计变化：
+
+```bash
+python example/analyze_rgb_compare_height_clip_outliers_effect.py --save-dir output/rgb_compare/baseline --frames 75,80,85 --clip-min-mm 2.0
+```
+
+产物：
+
+- `height_clip_outliers_effect.csv`：关键帧 clip 前后对比表（min/p1/grad_p99/tags/outlier_count）。
+- `height_clip_outliers_effect.md`：对比摘要与结论说明（用于记录“未下降原因”）。
