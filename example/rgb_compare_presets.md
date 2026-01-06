@@ -109,6 +109,22 @@ python example/analyze_rgb_compare_warp_oob.py --save-dir output/rgb_compare/bas
 
 - `warp_oob_stats.csv`：关键帧 remap 出界像素数与比例（OOB）。
 
+## 离线：surface fields 后处理消融（fill_holes/smooth）
+
+当你怀疑 `uv_disp_mm` 的 coverage/尖峰与高度场 halo 主要由表层场提取/后处理引入（而非物理参数）时，可基于已有输出目录做消融对比：
+
+```bash
+python example/analyze_rgb_compare_surface_fields_ablation.py --save-dirs ^
+  output/rgb_compare/retest-2025-12-28_04-48-25-k800 ^
+  output/rgb_compare/retest-2025-12-28_11-48-18-k800-filloff ^
+  output/rgb_compare/retest-2025-12-28_05-11-10-k800-nosmooth ^
+  --out Report_surface_fields_ablation.md
+```
+
+产物：
+
+- `Report_surface_fields_ablation.md`：>=4 组组合（fill_holes/smooth）对比表 + 推荐设置。
+
 ## 坐标/翻转约定（只翻一次）与自动检查
 
 为避免同一轴在多层重复修正（导致“看起来像镜像/方向错”），建议把约定固定为：
