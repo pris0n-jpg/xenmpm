@@ -75,9 +75,11 @@ python example/validate_rgb_compare_output.py --save-dir <上面生成的目录>
 ```bash
 python example/analyze_rgb_compare_intermediate.py --save-dir output/rgb_compare/baseline --out output/rgb_compare/baseline/analysis_latest.csv
 python example/analyze_rgb_compare_flip_alignment.py --save-dir output/rgb_compare/baseline --frames 75,80,85 --out output/rgb_compare/baseline/alignment_flip_latest.csv
+python example/analyze_rgb_compare_uv_disp_contact.py --save-dir output/rgb_compare/baseline --frames 75,80,85
 ```
 
 产物说明：
 
 - `analysis_latest.csv`：对抽样帧的高度场/位移场统计与现象标签（halo_risk/edge_streak_risk 等）。
 - `alignment_flip_latest.csv`：对关键帧的 direct vs mirror 与 uv_grid flip 判定，用于快速确认“坐标/翻转”一致性。
+- `uv_disp_contact_stats.csv` / `uv_disp_contact_diagnostics.md`：对关键帧接触区的 `uv_disp_mm` 做 coverage/分位数/尖峰位置统计，用于解释“多数不动 + 少量抽风”。
