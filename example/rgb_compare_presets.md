@@ -53,3 +53,31 @@ python example/validate_rgb_compare_output.py --save-dir <上面生成的目录>
 - `metrics.csv/metrics.json` 行数与 `total_frames` 一致；
 - 若导出 intermediate，至少存在 `intermediate/frame_0000.npz`；
 - 若环境支持 cv2，帧图 `fem_*.png/mpm_*.png` 数量与 `total_frames` 一致。
+
+## baseline 验收口径（关键帧 + 指标）
+
+为避免“看起来不一样但不知道差在哪”，建议把验收口径固定为：
+
+- **关键帧**（默认轨迹/record_interval=5 下）：
+  - `press_end=29`
+  - `slide_mid=53`
+  - `hold_end=85`
+  - 以及人工对齐用帧：`75/80/85`
+- **核心关注点**：
+  - 高度场是否存在离群值导致的 halo/dark blob 风险（影响主观判断）。
+  - `uv_disp_mm` 在接触区的 coverage 与分布是否“稀疏 + 尖峰”（对应 marker “不动 + 抽风”）。
+  - flip/alignment 判定是否稳定（避免坐标系翻转造成的系统性错位）。
+
+## 分析复跑（生成/更新 analysis_latest.csv 与 alignment_flip_latest.csv）
+
+对一个既有输出目录（例如 `output/rgb_compare/baseline`），可直接用离线脚本生成/更新分析产物：
+
+```bash
+python example/analyze_rgb_compare_intermediate.py --save-dir output/rgb_compare/baseline --out output/rgb_compare/baseline/analysis_latest.csv
+python example/analyze_rgb_compare_flip_alignment.py --save-dir output/rgb_compare/baseline --frames 75,80,85 --out output/rgb_compare/baseline/alignment_flip_latest.csv
+```
+
+产物说明：
+
+- `analysis_latest.csv`：对抽样帧的高度场/位移场统计与现象标签（halo_risk/edge_streak_risk 等）。
+- `alignment_flip_latest.csv`：对关键帧的 direct vs mirror 与 uv_grid flip 判定，用于快速确认“坐标/翻转”一致性。
