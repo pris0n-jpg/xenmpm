@@ -96,3 +96,15 @@ python example/analyze_rgb_compare_height_clip_outliers_effect.py --save-dir out
 
 - `height_clip_outliers_effect.csv`：关键帧 clip 前后对比表（min/p1/grad_p99/tags/outlier_count）。
 - `height_clip_outliers_effect.md`：对比摘要与结论说明（用于记录“未下降原因”）。
+
+## 离线：warp 出界比例诊断（oob_ratio）
+
+用于判断 warp remap 是否存在较大比例的出界采样（可能导致边缘拉丝/短横线）：
+
+```bash
+python example/analyze_rgb_compare_warp_oob.py --save-dir output/rgb_compare/baseline --frames 75,80,85
+```
+
+产物：
+
+- `warp_oob_stats.csv`：关键帧 remap 出界像素数与比例（OOB）。

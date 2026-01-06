@@ -477,6 +477,7 @@ def warp_marker_texture(
     gel_size_mm: Tuple[float, float],
     flip_x: bool,
     flip_y: bool,
+    stats_out: Optional[Dict[str, float]] = None,
 ) -> np.ndarray:
     """
     使用面内位移场对 marker 纹理做非均匀 warp，使点阵体现拉伸/压缩/剪切。
@@ -484,6 +485,7 @@ def warp_marker_texture(
     - uv_disp_mm: (Ny,Nx,2)，单位 mm，u=+x 向右，v=+y 向上（以“传感器平面坐标”约定）
     - 采用逆向映射：输出像素 (x,y) 从输入 base_tex 采样 (x - dx, y - dy)
     - flip_x/flip_y 用于处理 texcoords / mesh 的翻转约定差异
+    - stats_out 可选：返回 remap 出界统计（oob_px/oob_ratio），用于诊断“短横线/拉丝”是否由出界采样引起
     """
     if base_tex.ndim != 3 or base_tex.shape[2] != 3:
         raise ValueError("base_tex must be (H,W,3)")
@@ -533,20 +535,31 @@ def warp_marker_texture(
     map_x = xx - dx_px.astype(np.float32)
     map_y = yy - dy_px.astype(np.float32)
 
+    # 诊断：统计 remap 出界比例（不做 clip，以避免“边缘反射/夹断”造成的拉丝拖影）。
+    finite = np.isfinite(map_x) & np.isfinite(map_y)
+    oob = (~finite) | (map_x < 0.0) | (map_x > float(tex_w - 1)) | (map_y < 0.0) | (map_y > float(tex_h - 1))
+    if stats_out is not None:
+        stats_out["oob_px"] = float(np.sum(oob))
+        stats_out["oob_ratio"] = float(np.mean(oob))
+
     if HAS_CV2:
-        # 与 numpy fallback 的 clip 行为保持一致，避免 remap 出界触发反射边界
-        # （典型现象：边缘 marker 被抻成短线/拖影，干扰方向/量级归因）。
-        map_x = np.clip(map_x, 0.0, tex_w - 1.001).astype(np.float32, copy=False)
-        map_y = np.clip(map_y, 0.0, tex_h - 1.001).astype(np.float32, copy=False)
+        # 与 numpy fallback 保持一致：对出界坐标使用 constant border，而不是 clip/reflect。
+        # Why：clip 会把大量出界采样“挤”到边缘像素，形成短横线/拉丝；reflect 会引入镜像拖影。
+        map_x = np.nan_to_num(map_x, nan=-1.0, posinf=-1.0, neginf=-1.0).astype(np.float32, copy=False)
+        map_y = np.nan_to_num(map_y, nan=-1.0, posinf=-1.0, neginf=-1.0).astype(np.float32, copy=False)
+        border_value = tuple(int(x) for x in base_tex[0, 0].tolist())
         return cv2.remap(
             base_tex,
             map_x,
             map_y,
             interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT101,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border_value,
         )
 
-    # Numpy fallback: bilinear sampling (slow but keeps functionality)
+    # Numpy fallback: bilinear sampling + constant border for out-of-bounds.
+    map_x = np.nan_to_num(map_x, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    map_y = np.nan_to_num(map_y, nan=-1.0, posinf=-1.0, neginf=-1.0)
     map_x = np.clip(map_x, 0.0, tex_w - 1.001)
     map_y = np.clip(map_y, 0.0, tex_h - 1.001)
     x0 = np.floor(map_x).astype(np.int32)
@@ -564,7 +577,10 @@ def warp_marker_texture(
            Ib * wx * (1 - wy) +
            Ic * (1 - wx) * wy +
            Id * wx * wy)
-    return np.clip(out, 0, 255).astype(np.uint8)
+    out_u8 = np.clip(out, 0, 255).astype(np.uint8)
+    if oob.any():
+        out_u8[oob] = base_tex[0, 0].astype(np.uint8, copy=False)
+    return out_u8
 
 
 def _mpm_flip_x_field(field: np.ndarray) -> np.ndarray:
