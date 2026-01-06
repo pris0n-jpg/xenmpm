@@ -187,6 +187,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not manifest_path.exists():
         return _fail(f"Missing run_manifest.json: {manifest_path}")
     manifest = _read_json(manifest_path)
+
+    # Print flip conventions for traceability (so results are “self-explaining” when shared).
+    run_context = manifest.get("run_context") or {}
+    if isinstance(run_context, dict):
+        resolved = run_context.get("resolved") or {}
+        if isinstance(resolved, dict):
+            conventions = resolved.get("conventions") or {}
+            if isinstance(conventions, dict):
+                print(
+                    "conventions:"
+                    f" uv_disp_flip_x={conventions.get('mpm_uv_disp_flip_x')} u_negate={conventions.get('mpm_uv_disp_u_negate')}"
+                    f" warp_flip_x={conventions.get('mpm_warp_flip_x')} warp_flip_y={conventions.get('mpm_warp_flip_y')}",
+                    flush=True,
+                )
+    scene_params = manifest.get("scene_params") or {}
+    if isinstance(scene_params, dict):
+        print(
+            "scene_params:"
+            f" mpm_render_flip_x={scene_params.get('mpm_render_flip_x')}"
+            f" mpm_warp_flip_x={scene_params.get('mpm_warp_flip_x')}"
+            f" mpm_warp_flip_y={scene_params.get('mpm_warp_flip_y')}",
+            flush=True,
+        )
     traj = manifest.get("trajectory") or {}
     if not isinstance(traj, dict):
         return _fail("run_manifest.json trajectory is not a dict")
@@ -369,11 +392,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ok = sum(1 for v in picked if v == expected)
         ratio = float(ok) / float(len(picked)) if picked else 0.0
         if ratio < float(args.min_pass_ratio):
-            return _fail(
-                f"{name}: expected={expected} ok={ok}/{len(picked)} ratio={ratio:.3f} < min_pass_ratio={float(args.min_pass_ratio):.3f}; "
-                "this usually indicates an extra/missing horizontal flip. "
-                "Check: --mpm-render-flip-x / --mpm-warp-flip-x / --mpm-warp-flip-y and run_manifest.json resolved.conventions."
-            )
+                return _fail(
+                    f"{name}: expected={expected} ok={ok}/{len(picked)} ratio={ratio:.3f} < min_pass_ratio={float(args.min_pass_ratio):.3f}; "
+                    "this usually indicates an extra/missing horizontal flip. "
+                    "Check: --mpm-render-flip-x / --mpm-warp-flip-x / --mpm-warp-flip-y and run_manifest.json run_context.resolved.conventions / scene_params."
+                )
         return 0
 
     if args.require_mpm_vs_fem:

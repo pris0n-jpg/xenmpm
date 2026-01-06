@@ -108,3 +108,17 @@ python example/analyze_rgb_compare_warp_oob.py --save-dir output/rgb_compare/bas
 产物：
 
 - `warp_oob_stats.csv`：关键帧 remap 出界像素数与比例（OOB）。
+
+## 坐标/翻转约定（只翻一次）与自动检查
+
+为避免同一轴在多层重复修正（导致“看起来像镜像/方向错”），建议把约定固定为：
+
+- `uv_disp_mm`：u=+x 向右，v=+y 向上（传感器平面坐标）。
+- “是否需要水平翻转”只在一处处理：要么由 `--mpm-render-flip-x`（场/渲染一致翻转）负责，要么由 warp 的 `--mpm-warp-flip-x/--mpm-warp-flip-y` 负责。
+- 追溯来源：`run_manifest.json` 的 `run_context.resolved.conventions` 与 `scene_params` 会记录上述开关，便于回溯。
+
+可用 alignment 工具对关键帧做自动检查（失败即提示可能存在多翻/漏翻）：
+
+```bash
+python example/analyze_rgb_compare_flip_alignment.py --save-dir output/rgb_compare/baseline --frames 75,80,85 --require-mpm-vs-fem direct --require-uv-best noflip --out output/rgb_compare/baseline/alignment_flip_latest.csv
+```
