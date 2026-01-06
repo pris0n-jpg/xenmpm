@@ -45,6 +45,7 @@ def main() -> int:
     # 2) Load script definitions (will print warnings if optional deps missing; that's OK)
     module = runpy.run_path(str(script_path))
     required = [
+        "DEFAULT_MPM_MARKER_MODE",
         "SCENE_PARAMS",
         "_analyze_binary_stl_endfaces_mm",
         "_mpm_flip_x_field",
@@ -57,6 +58,9 @@ def main() -> int:
     for name in required:
         if name not in module:
             return _fail(f"Missing symbol in {script_path.name}: {name}")
+
+    if str(module.get("DEFAULT_MPM_MARKER_MODE") or "") != "warp":
+        return _fail(f"Unexpected DEFAULT_MPM_MARKER_MODE: {module.get('DEFAULT_MPM_MARKER_MODE')} (expected 'warp')")
 
     scene_params = module["SCENE_PARAMS"]
     for key in ["fem_fric_coef", "mpm_mu_s", "mpm_mu_k", "gel_size_mm"]:

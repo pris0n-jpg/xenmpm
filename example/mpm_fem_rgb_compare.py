@@ -135,6 +135,10 @@ except Exception as e:
 # ==============================================================================
 # Scene Parameters
 # ==============================================================================
+# 默认 marker 策略属于用户可见行为；如需调整默认值，请先按 `openspec/AGENTS.md` 创建 proposal，
+# 以保证向后兼容并补齐迁移说明。
+DEFAULT_MPM_MARKER_MODE = "warp"
+
 SCENE_PARAMS = {
     # Gel geometry (match VecTouchSim defaults)
     'gel_size_mm': (17.3, 29.15),       # width (x), height (y) in mm
@@ -2978,7 +2982,7 @@ def main():
         help='FEM marker rendering: on|off (off = white background for shading comparison)'
     )
     parser.add_argument(
-        '--mpm-marker', type=str, choices=['off', 'static', 'warp'], default='warp',
+        '--mpm-marker', type=str, choices=['off', 'static', 'warp'], default=DEFAULT_MPM_MARKER_MODE,
         help='MPM marker rendering: off|static|warp (warp reflects stretch/shear from tangential displacement)'
     )
     parser.add_argument(

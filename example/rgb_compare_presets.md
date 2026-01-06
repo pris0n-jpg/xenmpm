@@ -12,6 +12,7 @@
 
 - `--mpm-marker` 默认 `warp`（点阵会参与面内位移 warp，因此会随滑移变形）。  
 - `--fem-marker` 默认 `on`；若只想看形变/光照，可用 `--fem-marker off --mpm-marker off`。
+- 默认值变更属于用户可见行为变更；如需调整默认 marker 策略，请先按 `openspec/AGENTS.md` 创建 OpenSpec proposal，并记录兼容/迁移说明。
 
 ## 预设 1：press-only（只压入不滑移）
 
